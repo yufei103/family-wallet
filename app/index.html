@@ -40,8 +40,8 @@
       <div class="topbar-actions">
         <select class="workspace-select" id="workspaceSelect" aria-label="选择个人或家庭账本"></select>
         <button class="icon-button" id="inviteMemberButton" type="button" aria-label="邀请家庭成员" title="邀请家庭成员">＋</button>
-        <button class="text-button" id="signOutButton" type="button">登出</button>
-        <span class="local-badge" id="syncBadge">准备中</span>
+        <button class="icon-button more-button" id="moreButton" type="button" aria-label="设置与数据" title="设置与数据">⋯</button>
+        <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；点按可重试">准备中</button>
       </div>
     </header>
 
@@ -131,6 +131,19 @@
       </div>
       <div class="account-list surface-list" id="accountList" aria-live="polite"></div>
     </section>
+
+    <section class="app-view items-view" data-view="items" aria-labelledby="itemsHeading" hidden>
+      <div class="view-header items-header">
+        <div><h2 id="itemsHeading">物品橱窗</h2><p>收藏想买、分期中与已拥有的物品</p></div>
+        <button class="secondary-button compact" id="newItemButton" data-mutation type="button">新增物品</button>
+      </div>
+      <fieldset class="segmented items-segmented" aria-label="筛选物品">
+        <label><input type="radio" name="itemsFilter" value="active" checked><span>收藏中</span></label>
+        <label><input type="radio" name="itemsFilter" value="archived"><span>已归档</span></label>
+      </fieldset>
+      <p class="items-message" id="itemsMessage" aria-live="polite"></p>
+      <div class="items-grid" id="itemsGrid" aria-live="polite"></div>
+    </section>
   </main>
 
   <nav class="bottom-nav" id="bottomNav" aria-label="主要导航" hidden>
@@ -149,9 +162,9 @@
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg>
       <span>账户</span>
     </button>
-    <button class="nav-item" id="exportButton" type="button" aria-label="导出本地账本" title="导出本地账本">
-      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2M7 11l5 5l5 -5M12 4v12"/></svg>
-      <span>备份</span>
+    <button class="nav-item" data-view-target="items" type="button">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14h-16zM8 9h8M8 13h8M8 17h5"/></svg>
+      <span>物品</span>
     </button>
   </nav>
 
@@ -293,6 +306,113 @@
       <p class="sheet-description">移除账目会先反算余额。永久删除前仍可恢复。</p>
       <div class="recycle-list" id="recycleList"></div>
     </div>
+  </dialog>
+
+  <dialog id="settingsDialog" class="modal compact-modal">
+    <div>
+      <div class="sheet-head">
+        <div><p class="sheet-context">Family Wallet</p><h2>设置与数据</h2></div>
+        <button class="icon-button" type="button" data-close-dialog="settingsDialog" aria-label="关闭">×</button>
+      </div>
+      <p class="sheet-description">导出当前账本和物品付款元数据。照片内容不会进入备份。</p>
+      <div class="settings-actions">
+        <button class="secondary-button" id="exportButton" type="button">导出资料</button>
+        <button class="danger-button" id="signOutButton" type="button">登出</button>
+      </div>
+      <p class="form-message" id="settingsMessage" aria-live="polite"></p>
+    </div>
+  </dialog>
+
+  <dialog id="newItemDialog" class="modal">
+    <form method="dialog" id="newItemForm">
+      <div class="sheet-head">
+        <div><p class="sheet-context">物品橱窗</p><h2>新增物品</h2></div>
+        <button class="icon-button" type="button" data-close-dialog="newItemDialog" aria-label="关闭">×</button>
+      </div>
+      <label class="field"><span>物品名称</span><input id="newItemName" name="name" maxlength="80" required placeholder="例如：相机、沙发"></label>
+      <label class="field"><span>全价（RM）</span><input id="newItemFullPrice" name="fullPrice" inputmode="decimal" required placeholder="0.00"></label>
+      <label class="field"><span>备注（可选）</span><textarea id="newItemNote" name="note" maxlength="240" placeholder="型号、颜色或购买计划"></textarea></label>
+      <label class="field file-field"><span>封面（可选）</span><input id="newItemCover" type="file" accept="image/jpeg,image/png,image/webp"><small id="newItemCoverStatus">浏览器内压缩为独立 JPEG 资料</small></label>
+      <div class="deposit-panel">
+        <h3>订金（可选）</h3>
+        <label class="field"><span>金额（RM）</span><input id="newItemDepositAmount" inputmode="decimal" placeholder="0.00"></label>
+        <label class="field"><span>日期</span><input id="newItemDepositDate" type="date"></label>
+        <label class="field"><span>订金备注</span><input id="newItemDepositNote" maxlength="100"></label>
+        <label class="field file-field"><span>订金凭证（可选）</span><input id="newItemReceipt" type="file" accept="image/jpeg,image/png,image/webp"><small id="newItemReceiptStatus">仅在请求时读取</small></label>
+        <div id="newItemLinkControls" hidden>
+          <label class="switch-row"><span><b>同时记入账目</b><small>默认开启；关闭后为独立付款，不影响账户余额</small></span><input id="newItemLinked" type="checkbox" checked></label>
+          <label class="field" id="newItemAccountRow"><span>付款账户</span><select id="newItemAccount"></select></label>
+        </div>
+      </div>
+      <p class="form-message" id="newItemMessage" aria-live="polite"></p>
+      <button class="primary-button" id="saveNewItemButton" data-mutation type="submit">保存物品</button>
+    </form>
+  </dialog>
+
+  <dialog id="itemDetailDialog" class="modal item-detail-modal">
+    <div>
+      <div class="sheet-head">
+        <div><p class="sheet-context">物品详情</p><h2 id="itemDetailName">物品</h2></div>
+        <button class="icon-button" type="button" data-close-dialog="itemDetailDialog" aria-label="关闭">×</button>
+      </div>
+      <div class="item-detail-hero">
+        <div class="item-detail-cover" id="itemDetailCover"></div>
+        <div class="item-detail-summary">
+          <span id="itemDetailState">收藏中</span>
+          <strong id="itemDetailBalance">RM 0.00</strong>
+          <small id="itemDetailPaid">已付 RM 0.00 / RM 0.00</small>
+          <span class="item-progress"><i id="itemDetailProgress"></i></span>
+        </div>
+      </div>
+      <p class="item-note" id="itemDetailNote"></p>
+      <div class="detail-primary-actions">
+        <button class="primary-button" id="payItemFullButton" data-mutation type="button">一次付清</button>
+        <button class="secondary-button" id="payItemPartButton" data-mutation type="button">记录一期</button>
+      </div>
+      <div class="detail-secondary-actions">
+        <button class="minor-button" id="editItemButton" data-mutation type="button">编辑</button>
+        <button class="minor-button" id="archiveItemButton" data-mutation type="button" hidden>归档</button>
+        <button class="minor-button" id="restoreItemButton" data-mutation type="button" hidden>恢复收藏</button>
+      </div>
+      <p class="form-message" id="itemDetailMessage" aria-live="polite"></p>
+      <div class="section-row item-timeline-heading"><div><h3>付款时间线</h3><p id="itemPaymentCount">载入中…</p></div></div>
+      <div class="payment-timeline" id="itemPaymentTimeline"></div>
+      <div class="receipt-preview" id="receiptPreview" hidden><img id="receiptImage" alt="付款凭证"><button class="text-button" id="closeReceiptButton" type="button">收起凭证</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="paymentDialog" class="modal compact-modal">
+    <form method="dialog" id="paymentForm">
+      <div class="sheet-head">
+        <div><p class="sheet-context">物品付款</p><h2 id="paymentDialogTitle">记录一期</h2></div>
+        <button class="icon-button" type="button" data-close-dialog="paymentDialog" aria-label="关闭">×</button>
+      </div>
+      <p class="sheet-description" id="paymentBalanceCopy"></p>
+      <label class="field"><span>金额（RM）</span><input id="paymentAmount" inputmode="decimal" required></label>
+      <label class="field"><span>日期</span><input id="paymentDate" type="date" required></label>
+      <label class="field"><span>备注（可选）</span><input id="paymentNote" maxlength="100"></label>
+      <label class="field file-field"><span>凭证（可选）</span><input id="paymentReceipt" type="file" accept="image/jpeg,image/png,image/webp"><small id="paymentReceiptStatus">会压缩并独立保存</small></label>
+      <label class="switch-row"><span><b>同时记入账目</b><small>关闭后为独立付款，不影响账户余额</small></span><input id="paymentLinked" type="checkbox" checked></label>
+      <label class="field" id="paymentAccountRow"><span>付款账户</span><select id="paymentAccount"></select></label>
+      <p class="form-message" id="paymentMessage" aria-live="polite"></p>
+      <button class="primary-button" id="savePaymentButton" data-mutation type="submit">保存付款</button>
+    </form>
+  </dialog>
+
+  <dialog id="editItemDialog" class="modal compact-modal">
+    <form method="dialog" id="editItemForm">
+      <div class="sheet-head">
+        <div><p class="sheet-context">物品橱窗</p><h2>编辑物品</h2></div>
+        <button class="icon-button" type="button" data-close-dialog="editItemDialog" aria-label="关闭">×</button>
+      </div>
+      <label class="field"><span>物品名称</span><input id="editItemName" maxlength="80" required></label>
+      <label class="field"><span>全价（RM）</span><input id="editItemFullPrice" inputmode="decimal" required></label>
+      <label class="field"><span>备注（可选）</span><textarea id="editItemNote" maxlength="240"></textarea></label>
+      <label class="field file-field"><span>替换封面（可选）</span><input id="editItemCover" type="file" accept="image/jpeg,image/png,image/webp"><small id="editItemCoverStatus">不选择会保留现有封面</small></label>
+      <label class="switch-row"><span><b>移除现有封面</b><small>替换图片时会自动关闭</small></span><input id="editItemRemoveCover" type="checkbox"></label>
+      <p class="form-message" id="editItemMessage" aria-live="polite"></p>
+      <button class="primary-button" id="saveEditItemButton" data-mutation type="submit">保存修改</button>
+    </form>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

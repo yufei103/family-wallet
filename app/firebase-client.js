@@ -5,7 +5,7 @@ import {
   onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut
 } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js';
 import {
-  arrayUnion, collection, connectFirestoreEmulator, doc, getDoc, initializeFirestore,
+  arrayUnion, collection, connectFirestoreEmulator, doc, getDoc, getDocs, initializeFirestore,
   onSnapshot, persistentLocalCache, persistentMultipleTabManager, query, runTransaction, setDoc,
   updateDoc, where, writeBatch
 } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
@@ -318,6 +318,12 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
   async function loadItemMedia(householdId, mediaId) {
     const snapshot = await getDoc(mediaRef(householdId, mediaId));
     return snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
+  }
+
+  /** One-shot metadata-only backup read; item media bytes remain excluded. */
+  async function loadAllItemPayments(householdId) {
+    const snapshot = await getDocs(collection(db, 'households', householdId, 'itemPayments'));
+    return snapshot.docs.map(item => ({ id: item.id, ...item.data() }));
   }
 
   /**
@@ -654,13 +660,19 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     signInTestUser: (email, password) => signInWithEmailAndPassword(auth, cleanEmail(email), password),
     logout: () => signOut(auth),
     ensureWorkspace,
-    watchUser: (uid, onData, onError) => onSnapshot(doc(db, 'users', uid), snapshot => onData(snapshot.data()), error => onError?.(error)),
+    watchUser: (uid, onData, onError) => onSnapshot(
+      doc(db, 'users', uid),
+      { includeMetadataChanges: true },
+      snapshot => onData(snapshot.data(), snapshotMetadata(snapshot)),
+      error => onError?.(error)
+    ),
     householdOptions,
     subscribeHousehold,
     // Item APIs intentionally keep Data URLs out of list listeners/core docs.
     subscribeItems,
     subscribeItemPayments,
     loadItemMedia,
+    loadAllItemPayments,
     createItem,
     addItemPayment,
     voidItemPayment,

@@ -15,7 +15,7 @@ test('PWA 声明与离线 worker 引用所有首屏模块', async () => {
   const manifestData = JSON.parse(manifest);
   assert.equal(manifestData.display, 'standalone');
   assert.deepEqual(manifestData.icons.map(icon => icon.sizes), ['192x192', '512x512', '512x512']);
-  for (const asset of ['index.html', 'styles.css', 'main.js', 'ledger.js', 'firebase-config.js', 'firebase-client.js']) assert.match(worker, new RegExp(asset.replace('.', '\\.')));
+  for (const asset of ['index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js', 'items-view.js', 'cloud-sync.js', 'firebase-config.js', 'firebase-client.js']) assert.match(worker, new RegExp(asset.replace('.', '\\.')));
   for (const icon of ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png']) assert.match(worker, new RegExp(icon.replace('.', '\\.')));
   assert.match(worker, /self\.skipWaiting\(\)/);
   assert.match(worker, /caches\.keys\(\).*cacheName !== CACHE/s);
@@ -25,12 +25,12 @@ test('PWA 声明与离线 worker 引用所有首屏模块', async () => {
   assert.match(styles, /\.sheet>form,\.sheet>div\s*\{[^}]*overflow-y:\s*auto/);
 });
 
-test('Premium Mobile UI 保留真实三视图、洞察层级与移动材质', async () => {
+test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async () => {
   const [html, main, styles, worker] = await Promise.all([
     readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'),
     readFile(app('./styles.css'), 'utf8'), readFile(app('./service-worker.js'), 'utf8')
   ]);
-  for (const view of ['overview', 'entries', 'accounts']) {
+  for (const view of ['overview', 'entries', 'accounts', 'items']) {
     assert.match(html, new RegExp(`data-view="${view}"`));
     assert.match(html, new RegExp(`data-view-target="${view}"`));
   }
@@ -41,7 +41,7 @@ test('Premium Mobile UI 保留真实三视图、洞察层级与移动材质', as
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-7/);
+  assert.match(worker, /family-wallet-v2-cloud-8/);
 });
 
 test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {
@@ -51,7 +51,7 @@ test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 
   assert.doesNotMatch(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*flex-end/);
   assert.match(styles, /@keyframes modal-enter/);
   assert.match(styles, /@keyframes modal-exit/);
-  assert.match(main, /if \(event\.target === dialog\) dismissDialog\(dialog\)/);
+  assert.match(main, /if \(event\.target === dialog\) requestDialogClose\(dialog\)/);
   assert.match(main, /dialog\.addEventListener\('cancel'/);
 });
 
@@ -184,6 +184,7 @@ test('正式入口包含 Google 登录、个人/家庭账本选择、Gmail 邀�
   assert.match(client, /此帐号尚未获准使用。授权编号/);
   assert.match(client, /personalHouseholdId/);
   assert.match(client, /householdIds:\s*arrayUnion/);
+  assert.match(client, /watchUser:[\s\S]*includeMetadataChanges:\s*true[\s\S]*snapshotMetadata\(snapshot\)/);
   assert.match(client, /family-\$\{ownerUid\}-\$\{crypto\.randomUUID\(\)\}/);
   assert.doesNotMatch(config, /private_key|serviceAccount|accessToken/i);
 });
@@ -192,12 +193,58 @@ test('云端同步按账户和每笔账目分开保存，余额由账目重算�
   const [main, client, ledger] = await Promise.all([
     readFile(app('./main.js'), 'utf8'), readFile(app('./firebase-client.js'), 'utf8'), readFile(app('./ledger.js'), 'utf8')
   ]);
-  assert.match(main, /deriveLedger\(\{ accounts: state\.accounts, transactions: state\.transactions \}\)/);
+  assert.match(main, /deriveLedger\(\{ accounts:raw\.accounts, transactions:raw\.transactions \}\)/);
   assert.match(client, /collection\(db, 'households', householdId, 'transactions'\)/);
   assert.match(client, /saveTransaction:/);
   const accountRecordBody = client.match(/const accountRecord = \(account, householdId\) => cleanRecord\(\{([\s\S]*?)\}\);/)?.[1] || '';
   assert.doesNotMatch(accountRecordBody, /balanceMinor:/);
   assert.match(ledger, /export function deriveLedger/);
+});
+
+test('物品橱窗、设置导出与同步恢复均接入真实运行路径', async () => {
+  const [html, main, styles, client, itemsView] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'),
+    readFile(app('./styles.css'), 'utf8'), readFile(app('./firebase-client.js'), 'utf8'),
+    readFile(app('./items-view.js'), 'utf8')
+  ]);
+  for (const id of [
+    'moreButton', 'settingsDialog', 'exportButton', 'itemsGrid', 'newItemDialog', 'itemDetailDialog',
+    'paymentDialog', 'editItemDialog', 'archiveItemButton', 'restoreItemButton'
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.doesNotMatch(html, /data-view-target="backup"/);
+  assert.match(html, /data-view-target="items"/);
+  assert.match(main, /cloud\.createItem\(/);
+  assert.match(main, /cloud\.addItemPayment\(/);
+  assert.match(main, /cloud\[action === 'void' \? 'voidItemPayment' : 'restoreItemPayment'\]/);
+  assert.match(main, /cloud\[action === 'archive' \? 'archiveItem' : 'restoreItem'\]/);
+  assert.match(main, /openItemFromLedger\(entry\.sourceItemId, entry\.sourcePaymentId\)/);
+  assert.match(main, /entry\?\.sourceType === 'itemPayment'/);
+  assert.match(main, /new IntersectionObserver/);
+  assert.match(client, /async function loadItemMedia/);
+  assert.match(client, /async function loadAllItemPayments/);
+  assert.match(itemsView, /schemaVersion:LOCAL_SCHEMA_VERSION/);
+  assert.match(itemsView, /withoutMediaDataUrls/);
+  assert.match(styles, /\.items-grid\s*\{[^}]*repeat\(2,/s);
+  assert.match(styles, /@media \(min-width: 1024px\)[\s\S]*\.items-grid\s*\{[^}]*repeat\(4,/);
+  assert.match(styles, /\.modal\[open\]\s*\{[^}]*align-items:\s*center/);
+  assert.doesNotMatch(styles, /\.modal\[open\]\s*\{[^}]*align-items:\s*flex-end/);
+});
+
+test('同步状态区分缓存、待同步、离线和恢复，并在前台事件后重订阅', async () => {
+  const main = await readFile(app('./main.js'), 'utf8');
+  for (const status of ['cached', 'pending', 'synced', 'offline', 'recovering', 'error']) {
+    assert.match(main, new RegExp(`${status}:`));
+  }
+  assert.match(main, /syncCoordinator\.registerWrite/);
+  assert.match(main, /syncCoordinator\.acceptSnapshot\(listenerToken, raw, metadata\)/);
+  assert.match(main, /window\.addEventListener\('online'/);
+  assert.match(main, /window\.addEventListener\('offline'/);
+  assert.match(main, /window\.addEventListener\('focus'/);
+  assert.match(main, /window\.addEventListener\('pageshow'/);
+  assert.match(main, /document\.addEventListener\('visibilitychange'/);
+  assert.match(main, /syncCoordinator\.requestRecovery\(trigger\)/);
+  assert.match(main, /switchCloudHousehold\(event\.target\.value, \{ persistSelection:true \}\)/);
+  assert.doesNotMatch(main, /ledger = previous/);
 });
 
 test('GitHub Pages 流程先跑测试、Rules Emulator 和 Build，再发布静态 dist', async () => {
@@ -214,6 +261,7 @@ test('GitHub Pages 流程先跑测试、Rules Emulator 和 Build，再发布静�
   assert.match(workflow, /path: dist/);
   assert.doesNotMatch(workflow, /service.?account|private.?key|access.?token/i);
   assert.match(build, /FIREBASE_API_KEY/);
+  for (const runtime of ['items.js', 'item-media.js', 'items-view.js', 'cloud-sync.js']) assert.match(build, new RegExp(runtime.replace('.', '\\.')));
   assert.doesNotMatch(build, /cp\(source, output/);
   assert.doesNotMatch(build, /emulator-login\.html|\.test\.mjs/);
 });

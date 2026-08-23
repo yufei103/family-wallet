@@ -4,7 +4,10 @@ import { resolve } from 'node:path';
 const root = resolve(new URL('..', import.meta.url).pathname);
 const source = resolve(root, 'app');
 const output = resolve(root, 'dist');
-const required = ['index.html', 'styles.css', 'main.js', 'ledger.js', 'firebase-client.js', 'service-worker.js', 'manifest.webmanifest'];
+const required = [
+  'index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js',
+  'items-view.js', 'cloud-sync.js', 'firebase-client.js', 'service-worker.js', 'manifest.webmanifest'
+];
 const iconFiles = ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 const configKeys = {
   apiKey: 'FIREBASE_API_KEY',
