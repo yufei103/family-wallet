@@ -41,7 +41,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-8/);
+  assert.match(worker, /family-wallet-v2-cloud-9/);
 });
 
 test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {
@@ -186,6 +186,17 @@ test('正式入口包含 Google 登录、个人/家庭账本选择、Gmail 邀�
   assert.match(client, /householdIds:\s*arrayUnion/);
   assert.match(client, /watchUser:[\s\S]*includeMetadataChanges:\s*true[\s\S]*snapshotMetadata\(snapshot\)/);
   assert.match(client, /family-\$\{ownerUid\}-\$\{crypto\.randomUUID\(\)\}/);
+  assert.match(client, /runtimeConfig = firebaseHostingOrigin \? \{ \.\.\.config, authDomain: globalThis\.location\.hostname \} : config/);
+  assert.match(client, /async function signInGoogle\(\{ preferRedirect = false \} = \{\}\)/);
+  assert.match(client, /if \(preferRedirect\)[\s\S]*signInWithRedirect\(auth, googleProvider\)/);
+  assert.match(client, /finishRedirectSignIn/);
+  assert.doesNotMatch(client, /auth\/cancelled-popup-request'\s*,\s*'auth\/web-storage-unsupported/);
+  assert.match(main, /let googleSignInPending = false/);
+  assert.match(main, /shouldRedirectGoogleSignIn/);
+  assert.match(main, /display-mode: standalone/);
+  assert.match(main, /button\.setAttribute\('aria-busy', 'true'\)/);
+  assert.match(main, /Google 登录窗口已打开，请在该窗口完成登录/);
+  assert.match(main, /await cloud\.finishRedirectSignIn\(\)/);
   assert.doesNotMatch(config, /private_key|serviceAccount|accessToken/i);
 });
 

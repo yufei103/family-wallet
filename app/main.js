@@ -1661,11 +1661,40 @@ async function handleCloudUser(user) {
   await applyCloudProfile(profile, sessionToken);
 }
 
+let googleSignInPending = false;
+
+function shouldRedirectGoogleSignIn() {
+  const mobile = navigator.userAgentData?.mobile === true || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  const standalone = window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+  const firebaseHostingOrigin = /\.(?:web\.app|firebaseapp\.com)$/.test(location.hostname);
+  return firebaseHostingOrigin && (mobile || standalone);
+}
+
+function googleSignInErrorMessage(error) {
+  if (error?.code === 'auth/popup-closed-by-user') return 'Google 登录窗口已关闭，请再试一次。';
+  if (error?.code === 'auth/cancelled-popup-request') return '上一轮 Google 登录仍在处理，请稍后再试。';
+  return `Google 登录失败：${error?.message || '未知错误'}`;
+}
+
 $('#googleSignInButton').addEventListener('click', async () => {
-  $('#googleSignInButton').disabled = true;
-  try { await cloud.signInGoogle(); }
-  catch (error) { showAuth(`Google 登录失败：${error.message}`); }
-  finally { $('#googleSignInButton').disabled = false; }
+  if (googleSignInPending) return;
+  const button = $('#googleSignInButton');
+  const preferRedirect = shouldRedirectGoogleSignIn();
+  googleSignInPending = true;
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.textContent = preferRedirect ? '正在前往 Google…' : '等待 Google 登录…';
+  showAuth(preferRedirect ? '正在打开 Google 登录页面…' : 'Google 登录窗口已打开，请在该窗口完成登录。');
+  try {
+    await cloud.signInGoogle({ preferRedirect });
+  } catch (error) {
+    showAuth(googleSignInErrorMessage(error));
+  } finally {
+    googleSignInPending = false;
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    button.textContent = '使用 Google 帐号登录';
+  }
 });
 
 $('#testRegisterButton').addEventListener('click', async () => {
@@ -1760,6 +1789,10 @@ async function startRuntime() {
     showAuth('使用你自己的 Google 帐号登录。');
   }
   cloud = await createFirebaseWallet({ config: firebaseConfig, useEmulators });
+  if (!useEmulators) {
+    try { await cloud.finishRedirectSignIn(); }
+    catch (error) { showAuth(googleSignInErrorMessage(error)); }
+  }
   cloud.onAuthChanged(user => handleCloudUser(user).catch(error => showAuth(error.message)));
 }
 

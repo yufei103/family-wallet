@@ -2,7 +2,7 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.16.0/fireba
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-app-check.js';
 import {
   GoogleAuthProvider, connectAuthEmulator, createUserWithEmailAndPassword, getAuth,
-  onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut
+  getRedirectResult, onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut
 } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js';
 import {
   arrayUnion, collection, connectFirestoreEmulator, doc, getDoc, getDocs, initializeFirestore,
@@ -53,12 +53,14 @@ const transactionRecord = (entry, householdId, actorUid) => {
 };
 
 export async function createFirebaseWallet({ config, useEmulators = false }) {
+  const firebaseHostingOrigin = !useEmulators && /\.(?:web\.app|firebaseapp\.com)$/.test(globalThis.location?.hostname ?? '');
+  const runtimeConfig = firebaseHostingOrigin ? { ...config, authDomain: globalThis.location.hostname } : config;
   const app = initializeApp(useEmulators ? {
     apiKey: 'demo-family-wallet-v2',
     authDomain: 'demo-family-wallet-v2.firebaseapp.com',
     projectId: 'family-wallet-v2-emulator',
     appId: '1:123:web:family-wallet-v2'
-  } : config);
+  } : runtimeConfig);
   if (!useEmulators) {
     if (!config.appCheckSiteKey) throw new Error('Firebase App Check 尚未配置');
     initializeAppCheck(app, {
@@ -79,14 +81,21 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
   const googleProvider = new GoogleAuthProvider();
   googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-  async function signInGoogle() {
+  async function signInGoogle({ preferRedirect = false } = {}) {
+    if (preferRedirect) {
+      await signInWithRedirect(auth, googleProvider);
+      return { mode: 'redirect' };
+    }
     try {
-      return await signInWithPopup(auth, googleProvider);
+      return { mode: 'popup', credential: await signInWithPopup(auth, googleProvider) };
     } catch (error) {
-      if (!['auth/popup-blocked', 'auth/cancelled-popup-request', 'auth/web-storage-unsupported'].includes(error.code)) throw error;
-      return signInWithRedirect(auth, googleProvider);
+      if (!['auth/popup-blocked', 'auth/web-storage-unsupported'].includes(error.code)) throw error;
+      await signInWithRedirect(auth, googleProvider);
+      return { mode: 'redirect' };
     }
   }
+
+  const finishRedirectSignIn = () => getRedirectResult(auth);
 
   async function ensureWorkspace(user) {
     const email = cleanEmail(user.email);
@@ -656,6 +665,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
   return {
     onAuthChanged: callback => onAuthStateChanged(auth, callback),
     signInGoogle,
+    finishRedirectSignIn,
     registerTestUser: (email, password) => createUserWithEmailAndPassword(auth, cleanEmail(email), password),
     signInTestUser: (email, password) => signInWithEmailAndPassword(auth, cleanEmail(email), password),
     logout: () => signOut(auth),
