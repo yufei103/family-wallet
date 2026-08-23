@@ -6,6 +6,8 @@ import {
 
 const STORE = 'family-wallet-v2-local-demo';
 const ENTRY_PREFS_STORE = 'family-wallet-v2-entry-preferences';
+const ENTRY_CATEGORIES = ['薪水', '购物', '医疗', '房贷', '电费', '税费', '打油', '汽车'];
+const accountDetailPageSize = () => innerWidth < 600 ? 6 : 10;
 const $ = selector => document.querySelector(selector);
 const today = () => new Date().toISOString().slice(0, 10);
 const uid = prefix => `${prefix}-${Date.now()}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
@@ -27,6 +29,7 @@ let selectedMonth = today().slice(0, 7);
 let activeView = 'overview';
 let entryPreferences = hydrateEntryPreferences();
 let selectedAccountDetailId = null;
+let accountDetailPage = 1;
 let pendingAccountPhotoDataUrl = null;
 let runtimeMode = 'starting';
 let cloud = null;
@@ -86,6 +89,31 @@ function showAuth(message) {
 function setSyncState(message, bad = false) {
   $('#syncBadge').textContent = message;
   $('#syncBadge').classList.toggle('bad', bad);
+}
+
+function showDialog(dialog) {
+  dialog.classList.remove('is-closing');
+  dialog.showModal();
+}
+
+function dismissDialog(dialog, afterClose) {
+  if (!dialog?.open || dialog.classList.contains('is-closing')) return;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    dialog.close();
+    afterClose?.();
+    return;
+  }
+  dialog.classList.add('is-closing');
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    dialog.classList.remove('is-closing');
+    dialog.close();
+    afterClose?.();
+  };
+  dialog.addEventListener('animationend', finish, { once:true });
+  setTimeout(finish, 190);
 }
 
 function usesCloudStore() { return runtimeMode === 'cloud' || runtimeMode === 'emulator'; }
@@ -253,13 +281,23 @@ function renderAccountDetail() {
     .filter(entry => entry.occurredAt.slice(0, 7) === selectedMonth)
     .filter(entry => entry.accountId === account.id || entry.targetAccountId === account.id)
     .sort(compareEntriesNewestFirst);
+  const pageSize = accountDetailPageSize();
+  const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
+  accountDetailPage = Math.min(Math.max(1, accountDetailPage), totalPages);
+  const pageStart = (accountDetailPage - 1) * pageSize;
+  const visibleEntries = entries.slice(pageStart, pageStart + pageSize);
   $('#accountDetailName').textContent = account.name;
   $('#accountDetailKind').textContent = account.kind === 'liability' ? '负债账户' : '资产账户';
   $('#accountDetailBalance').textContent = formatRM(account.balanceMinor);
   $('#accountDetailAvatar').innerHTML = accountAvatarMarkup(account);
   $('#accountDetailMonthLabel').textContent = `${monthLabel(selectedMonth)}账目`;
   $('#accountDetailCount').textContent = `${entries.length} 笔记录`;
-  $('#accountDetailTransactionList').innerHTML = renderTransactionRows(entries, '这个月没有相关账目', '此账户在所选月份没有收入、支出或转账。', account.id);
+  $('#accountDetailTransactionList').innerHTML = renderTransactionRows(visibleEntries, '这个月没有相关账目', '此账户在所选月份没有收入、支出或转账。', account.id);
+  const pagination = $('#accountDetailPagination');
+  pagination.hidden = totalPages <= 1;
+  $('#accountDetailPageLabel').textContent = `第 ${accountDetailPage} / ${totalPages} 页`;
+  $('#accountDetailPrevPage').disabled = accountDetailPage === 1;
+  $('#accountDetailNextPage').disabled = accountDetailPage === totalPages;
   bindRenderedControls($('#accountDetailTransactionList'));
 }
 
@@ -267,15 +305,16 @@ function openAccountDetail(accountId) {
   const account = accountById(accountId);
   if (!account || account.archivedAt) return;
   selectedAccountDetailId = accountId;
+  accountDetailPage = 1;
   renderAccountDetail();
-  $('#accountDetailDialog').showModal();
+  showDialog($('#accountDetailDialog'));
 }
 
 function bindRenderedControls(root = document) {
   root.querySelectorAll('[data-account-id]').forEach(button => button.addEventListener('click', () => openAccountDetail(button.dataset.accountId)));
   root.querySelectorAll('[data-transaction-id]').forEach(button => button.addEventListener('click', () => {
-    if ($('#accountDetailDialog').open) $('#accountDetailDialog').close();
-    openEntry(button.dataset.transactionId);
+    if ($('#accountDetailDialog').open) dismissDialog($('#accountDetailDialog'), () => openEntry(button.dataset.transactionId));
+    else openEntry(button.dataset.transactionId);
   }));
   root.querySelectorAll('[data-add-entry]').forEach(button => button.addEventListener('click', () => openEntry()));
 }
@@ -321,10 +360,34 @@ function populateAccounts() {
   $('#targetAccount').innerHTML = options;
 }
 
+function selectCategory(value = '', focusCustom = false) {
+  const normalized = String(value || '').trim();
+  const directCategory = ENTRY_CATEGORIES.includes(normalized);
+  const selectedCategory = directCategory ? normalized : normalized ? '其它' : '';
+  document.querySelectorAll('[data-category]').forEach(button => {
+    const selected = button.dataset.category === selectedCategory;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-checked', String(selected));
+  });
+  const customField = $('#customCategoryField');
+  customField.hidden = selectedCategory !== '其它';
+  if (directCategory) {
+    $('#customCategoryInput').value = '';
+    $('#categoryInput').value = normalized;
+  } else if (selectedCategory === '其它') {
+    $('#customCategoryInput').value = normalized === '其它' ? '' : normalized;
+    $('#categoryInput').value = $('#customCategoryInput').value.trim();
+    if (focusCustom) setTimeout(() => $('#customCategoryInput').focus(), 30);
+  } else {
+    $('#customCategoryInput').value = '';
+    $('#categoryInput').value = '';
+  }
+}
+
 function updateKindState() {
   const transfer = document.querySelector('input[name="kind"]:checked').value === 'transfer';
   $('#targetRow').hidden = !transfer;
-  $('#categoryInput').closest('label').hidden = transfer;
+  $('#categoryRow').hidden = transfer;
 }
 
 function openEntry(id = null) {
@@ -356,17 +419,18 @@ function openEntry(id = null) {
     $('#amountInput').value = senToAmount(entry.amountMinor);
     $('#sourceAccount').value = entry.accountId;
     $('#targetAccount').value = entry.targetAccountId || '';
-    $('#categoryInput').value = entry.category || '';
+    selectCategory(entry.category || '');
     $('#noteInput').value = entry.note || '';
     $('#dateInput').value = entry.occurredAt.slice(0, 10);
   } else {
     document.querySelector(`input[name="kind"][value="${entryPreferences.lastKind}"]`).checked = true;
     applyRememberedAccounts(entryPreferences.lastKind);
+    selectCategory('');
     $('#dateInput').value = today();
   }
 
   updateKindState();
-  $('#entryDialog').showModal();
+  showDialog($('#entryDialog'));
   setTimeout(() => $('#amountInput').focus(), 30);
 }
 
@@ -436,7 +500,7 @@ function openAccount(id = null) {
   pendingAccountPhotoDataUrl = account?.photoDataUrl || null;
   renderAccountPhotoPreview();
   document.querySelector(`input[name="accountKind"][value="${account?.kind || 'asset'}"]`).checked = true;
-  $('#accountDialog').showModal();
+  showDialog($('#accountDialog'));
   setTimeout(() => $('#accountName').focus(), 30);
 }
 
@@ -473,13 +537,35 @@ function exportLocal() {
 }
 
 document.querySelectorAll('[data-view-target]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewTarget)));
-document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => $(`#${button.dataset.closeDialog}`).close()));
+document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => dismissDialog($(`#${button.dataset.closeDialog}`))));
+document.querySelectorAll('dialog').forEach(dialog => {
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) dismissDialog(dialog);
+  });
+  dialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    dismissDialog(dialog);
+  });
+});
 $('#newEntryButton').addEventListener('click', () => openEntry());
 $('#newAccountButton').addEventListener('click', () => openAccount());
 $('#editAccountFromDetailButton').addEventListener('click', () => {
   if (!selectedAccountDetailId) return;
-  $('#accountDetailDialog').close();
-  openAccount(selectedAccountDetailId);
+  dismissDialog($('#accountDetailDialog'), () => openAccount(selectedAccountDetailId));
+});
+$('#accountDetailPrevPage').addEventListener('click', () => {
+  accountDetailPage -= 1;
+  renderAccountDetail();
+});
+$('#accountDetailNextPage').addEventListener('click', () => {
+  accountDetailPage += 1;
+  renderAccountDetail();
+});
+document.querySelectorAll('[data-category]').forEach(button => button.addEventListener('click', () => {
+  selectCategory(button.dataset.category, button.dataset.category === '其它');
+}));
+$('#customCategoryInput').addEventListener('input', event => {
+  $('#categoryInput').value = event.target.value.trim();
 });
 $('#accountPhotoInput').addEventListener('change', async event => {
   const [file] = event.target.files || [];
@@ -500,10 +586,10 @@ $('#removeAccountPhotoButton').addEventListener('click', () => {
 });
 $('#viewAllEntriesButton').addEventListener('click', () => setView('entries'));
 $('#exportButton').addEventListener('click', exportLocal);
-$('#recycleButton').addEventListener('click', () => { renderRecycle(); $('#recycleDialog').showModal(); });
-$('#closeRecycleButton').addEventListener('click', () => $('#recycleDialog').close());
-$('#monthFilterButton').addEventListener('click', () => $('#monthDialog').showModal());
-$('#overviewMonthButton').addEventListener('click', () => $('#monthDialog').showModal());
+$('#recycleButton').addEventListener('click', () => { renderRecycle(); showDialog($('#recycleDialog')); });
+$('#closeRecycleButton').addEventListener('click', () => dismissDialog($('#recycleDialog')));
+$('#monthFilterButton').addEventListener('click', () => showDialog($('#monthDialog')));
+$('#overviewMonthButton').addEventListener('click', () => showDialog($('#monthDialog')));
 $('#monthPicker').addEventListener('change', event => {
   if (!event.target.value) return;
   selectedMonth = event.target.value;
@@ -511,7 +597,7 @@ $('#monthPicker').addEventListener('change', event => {
 });
 $('#monthForm').addEventListener('submit', event => {
   event.preventDefault();
-  $('#monthDialog').close();
+  dismissDialog($('#monthDialog'));
   setView('entries');
 });
 document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener('change', () => {
@@ -529,13 +615,15 @@ $('#entryForm').addEventListener('submit', async event => {
   try {
     const form = new FormData(event.currentTarget);
     const kind = form.get('kind');
+    const category = kind === 'transfer' ? null : String(form.get('category') || '').trim();
+    if (kind !== 'transfer' && !category) throw new Error('请选择分类，或在“其它”填写自定义分类');
     const editingTransactionId = $('#editingTransactionId').value;
     const changes = {
       kind,
       amountMinor:amountToSen(form.get('amount')),
       accountId:form.get('accountId'),
       targetAccountId:kind === 'transfer' ? form.get('targetAccountId') : null,
-      category:form.get('category'),
+      category,
       note:form.get('note'),
       occurredAt:`${form.get('occurredAt')}T12:00:00.000Z`
     };
@@ -544,7 +632,7 @@ $('#entryForm').addEventListener('submit', async event => {
       : applyOperation(ledger, { id:pendingOperationId, ...changes });
     await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, editingTransactionId || pendingOperationId));
     rememberEntryPreferences(kind, changes.accountId, changes.targetAccountId);
-    $('#entryDialog').close();
+    dismissDialog($('#entryDialog'));
     if (!editingTransactionId) setView('entries');
     showToast(result.duplicate ? '重复保存已阻止。' : editingTransactionId ? '修改已保存，余额已重新核对。' : '已保存，余额已重新核对。');
   } catch (error) {
@@ -559,7 +647,7 @@ $('#archiveTransactionButton').addEventListener('click', async () => {
   if (!editingTransactionId) return;
   const result = moveToRecycleBin(ledger, editingTransactionId, uid('recycle'));
   await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, editingTransactionId));
-  $('#entryDialog').close();
+  dismissDialog($('#entryDialog'));
   setView('entries');
   showToast(result.duplicate ? '重复回收已阻止。' : '已移入回收站，余额已重新核对。');
 });
@@ -581,7 +669,7 @@ $('#accountForm').addEventListener('submit', async event => {
     });
     const accountId = id || nextLedger.accounts.at(-1).id;
     await applyLedgerChange(nextLedger, next => saveAccountRecord(next, accountId));
-    $('#accountDialog').close();
+    dismissDialog($('#accountDialog'));
     setView('accounts');
     showToast(id ? '账户设置已保存。' : '新账户已加入当前账本。');
   } catch (error) {
@@ -594,7 +682,7 @@ $('#archiveAccountButton').addEventListener('click', async () => {
   if (!id) return;
   const nextLedger = archiveAccount(ledger, id);
   await applyLedgerChange(nextLedger, next => saveAccountRecord(next, id));
-  $('#accountDialog').close();
+  dismissDialog($('#accountDialog'));
   setView('accounts');
   showToast('账户已归档，并从家庭净额排除。');
 });
@@ -683,7 +771,7 @@ $('#workspaceSelect').addEventListener('change', event => {
 $('#inviteMemberButton').addEventListener('click', () => {
   $('#inviteForm').reset();
   $('#inviteMessage').textContent = '';
-  $('#inviteDialog').showModal();
+  showDialog($('#inviteDialog'));
 });
 $('#inviteForm').addEventListener('submit', async event => {
   event.preventDefault();
@@ -697,7 +785,7 @@ $('#inviteForm').addEventListener('submit', async event => {
       ownerEmail: cloudUser.email,
       ownerDisplayName: cloudUser.displayName
     });
-    $('#inviteDialog').close();
+    dismissDialog($('#inviteDialog'));
     showToast('邀请已建立。对方使用该 Gmail 登录后即可加入家庭账本。');
   } catch (error) {
     $('#inviteMessage').textContent = error.message;

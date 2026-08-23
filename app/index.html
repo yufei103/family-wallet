@@ -7,6 +7,8 @@
   <meta name="description" content="可由家人共同使用的私人家庭账本">
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="stylesheet" href="./styles.css">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png">
   <title>Family Wallet V2</title>
 </head>
 <body>
@@ -169,7 +171,22 @@
       <label class="field amount-field"><span>金额</span><div class="amount-input"><b>RM</b><input id="amountInput" name="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" required></div></label>
       <label class="field"><span>账户</span><select id="sourceAccount" name="accountId" required></select></label>
       <label class="field" id="targetRow" hidden><span>转入账户</span><select id="targetAccount" name="targetAccountId"></select></label>
-      <label class="field"><span>分类</span><input id="categoryInput" name="category" placeholder="例如：餐饮、薪资" maxlength="40"></label>
+      <div class="category-field" id="categoryRow">
+        <span class="field-label">分类</span>
+        <div class="category-chip-grid" id="categoryChipGrid" role="radiogroup" aria-label="快速选择分类">
+          <button class="category-chip" type="button" data-category="薪水" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16v12h-16zM8 7v-2h8v2M8 12h8M8 16h5"/></svg><span>薪水</span></button>
+          <button class="category-chip" type="button" data-category="购物" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 8h14l-1 13h-12zM9 9v-2a3 3 0 0 1 6 0v2"/></svg><span>购物</span></button>
+          <button class="category-chip" type="button" data-category="医疗" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 4h6v5h5v6h-5v5h-6v-5h-5v-6h5z"/></svg><span>医疗</span></button>
+          <button class="category-chip" type="button" data-category="房贷" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-8l9 8M5 10v10h14v-10M9 20v-6h6v6"/></svg><span>房贷</span></button>
+          <button class="category-chip" type="button" data-category="电费" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M13 2l-7 12h6l-1 8l7-12h-6z"/></svg><span>电费</span></button>
+          <button class="category-chip" type="button" data-category="税费" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2l-3 2l-3-2l-3 2zM9 8h6M9 12h6M9 16h3"/></svg><span>税费</span></button>
+          <button class="category-chip" type="button" data-category="打油" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 21v-17h10v17M5 9h10M15 7h3l2 3v8a2 2 0 0 1 -4 0v-4M8 13h4"/></svg><span>打油</span></button>
+          <button class="category-chip" type="button" data-category="汽车" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 17h14M6 17l-2-4l2-5h12l2 5l-2 4M7 17v2M17 17v2M7 13h.01M17 13h.01"/></svg><span>汽车</span></button>
+          <button class="category-chip" type="button" data-category="其它" role="radio" aria-checked="false"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg><span>其它</span></button>
+        </div>
+        <input id="categoryInput" name="category" type="hidden">
+        <label class="field custom-category-field" id="customCategoryField" hidden><span>其它分类</span><input id="customCategoryInput" maxlength="40" placeholder="输入自定义分类"></label>
+      </div>
       <label class="field"><span>备注（可选）</span><input id="noteInput" name="note" maxlength="100" placeholder="这笔钱用在哪里？"></label>
       <label class="field"><span>日期</span><input id="dateInput" name="occurredAt" type="date" required></label>
       <p class="form-message" id="entryMessage" aria-live="polite"></p>
@@ -199,6 +216,11 @@
         <div><h3 id="accountDetailMonthLabel">本月账目</h3><p id="accountDetailCount">0 笔记录</p></div>
       </div>
       <div class="transaction-list surface-list" id="accountDetailTransactionList" aria-live="polite"></div>
+      <nav class="detail-pagination" id="accountDetailPagination" aria-label="账户明细分页" hidden>
+        <button class="minor-button" id="accountDetailPrevPage" type="button">上一页</button>
+        <span id="accountDetailPageLabel">第 1 / 1 页</span>
+        <button class="minor-button" id="accountDetailNextPage" type="button">下一页</button>
+      </nav>
     </div>
   </dialog>
 

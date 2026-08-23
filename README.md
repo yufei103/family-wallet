@@ -8,8 +8,11 @@ A mobile-first household finance PWA for recording income, expenses, transfers a
 - Personal and shared household ledgers
 - Gmail invitation flow for family members
 - Income, expense and atomic account-to-account transfers
+- One-tap icon categories with an Other/custom option
 - Monthly summaries, account detail and newest-first activity
+- Responsive account-detail pagination (6 per phone page, 10 on larger screens)
 - Account photos compressed in the browser
+- Installable Web/iPhone icon assets without the source canvas border
 - Offline PWA shell and local Firestore cache
 - Recycle bin, restore, reconciliation and JSON backup
 - Responsive phone and desktop layouts

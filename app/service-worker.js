@@ -1,5 +1,8 @@
-const CACHE = 'family-wallet-v2-cloud-6';
-const ASSETS = ['./', './index.html', './styles.css', './main.js', './ledger.js', './firebase-config.js', './firebase-client.js', './manifest.webmanifest'];
+const CACHE = 'family-wallet-v2-cloud-7';
+const ASSETS = [
+  './', './index.html', './styles.css', './main.js', './ledger.js', './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
+  './icons/favicon-32.png', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'
+];
 
 self.addEventListener('install', event => event.waitUntil(
   caches.open(CACHE)

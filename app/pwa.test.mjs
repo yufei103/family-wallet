@@ -9,9 +9,14 @@ test('PWA 声明与离线 worker 引用所有首屏模块', async () => {
     readFile(app('./index.html'), 'utf8'), readFile(app('./manifest.webmanifest'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
   ]);
   assert.match(html, /rel="manifest"/);
+  assert.match(html, /rel="apple-touch-icon"[^>]*icons\/apple-touch-icon\.png/);
+  assert.match(html, /rel="icon"[^>]*icons\/favicon-32\.png/);
   assert.match(html, /type="module" src="\.\/main\.js"/);
-  assert.equal(JSON.parse(manifest).display, 'standalone');
+  const manifestData = JSON.parse(manifest);
+  assert.equal(manifestData.display, 'standalone');
+  assert.deepEqual(manifestData.icons.map(icon => icon.sizes), ['192x192', '512x512', '512x512']);
   for (const asset of ['index.html', 'styles.css', 'main.js', 'ledger.js', 'firebase-config.js', 'firebase-client.js']) assert.match(worker, new RegExp(asset.replace('.', '\\.')));
+  for (const icon of ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png']) assert.match(worker, new RegExp(icon.replace('.', '\\.')));
   assert.match(worker, /self\.skipWaiting\(\)/);
   assert.match(worker, /caches\.keys\(\).*cacheName !== CACHE/s);
   assert.match(worker, /event\.request\.method !== 'GET'/);
@@ -36,7 +41,38 @@ test('Premium Mobile UI 保留真实三视图、洞察层级与移动材质', as
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-6/);
+  assert.match(worker, /family-wallet-v2-cloud-7/);
+});
+
+test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {
+  const [main, styles] = await Promise.all([readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+  assert.match(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*center/);
+  assert.match(styles, /\.sheet>form,\.sheet>div\s*\{[^}]*border-radius:\s*24px[^}]*box-shadow:/s);
+  assert.doesNotMatch(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*flex-end/);
+  assert.match(styles, /@keyframes modal-enter/);
+  assert.match(styles, /@keyframes modal-exit/);
+  assert.match(main, /if \(event\.target === dialog\) dismissDialog\(dialog\)/);
+  assert.match(main, /dialog\.addEventListener\('cancel'/);
+});
+
+test('快速分类提供指定 Icon 标签与其它自定义输入，备注仍保持可选', async () => {
+  const [html, main] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8')]);
+  for (const category of ['薪水', '购物', '医疗', '房贷', '电费', '税费', '打油', '汽车', '其它']) {
+    assert.match(html, new RegExp(`data-category="${category}"`));
+  }
+  assert.match(html, /id="customCategoryInput"/);
+  assert.match(html, /备注（可选）/);
+  assert.match(main, /function selectCategory\(value = '', focusCustom = false\)/);
+  assert.match(main, /请选择分类，或在“其它”填写自定义分类/);
+});
+
+test('账户明细按手机 6 笔、桌面 10 笔分页并保留新到旧排序', async () => {
+  const [html, main] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8')]);
+  for (const id of ['accountDetailPagination', 'accountDetailPrevPage', 'accountDetailPageLabel', 'accountDetailNextPage']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(main, /const accountDetailPageSize = \(\) => innerWidth < 600 \? 6 : 10/);
+  assert.match(main, /\.sort\(compareEntriesNewestFirst\)/);
+  assert.match(main, /entries\.slice\(pageStart, pageStart \+ pageSize\)/);
+  assert.match(main, /pagination\.hidden = totalPages <= 1/);
 });
 
 test('中央新增按钮不会把 click event 当成交易 ID', async () => {
