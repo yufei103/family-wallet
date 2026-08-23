@@ -1,0 +1,9 @@
+node_modules/
+*-debug.log
+.firebase/
+dist/
+.hermes-runtime.json
+archive/
+app/firebase-config.local.js
+FIREBASE_EMULATOR_TEST_PLAN.md
+MIGRATION_ROLLBACK_RUNBOOK.md

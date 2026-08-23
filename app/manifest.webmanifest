@@ -1,0 +1,9 @@
+{
+  "name": "Family Wallet V2",
+  "short_name": "家庭账本",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f6f9f8",
+  "theme_color": "#0b5f5b",
+  "lang": "zh-Hans"
+}
