@@ -1,8 +1,19 @@
 import {
-  applyOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger, formatRM, householdTotals,
+  applyOperation as applyLedgerOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger, formatRM, householdTotals,
   monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile, restoreFromRecycleBin,
   serialiseLedger, updateAccount, updateTransaction
 } from './ledger.js';
+import {
+  archiveItem as archiveLocalItem, createItem as createLocalItem, createItemsState, editItem as editLocalItem,
+  recordItemPayment as recordLocalItemPayment, restoreItem as restoreLocalItem,
+  restoreItemPayment as restoreLocalItemPayment, serialiseItemsState, voidItemPayment as voidLocalItemPayment
+} from './items.js';
+import { compressItemMedia } from './item-media.js';
+import { createSyncCoordinator } from './cloud-sync.js';
+import {
+  displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch, normaliseDisplayItem,
+  rawSnapshotHasOperation, renderItemCards, serialiseLocalEnvelope, withoutMediaDataUrls
+} from './items-view.js';
 
 const STORE = 'family-wallet-v2-local-demo';
 const ENTRY_PREFS_STORE = 'family-wallet-v2-entry-preferences';
@@ -17,13 +28,17 @@ const seed = () => createLedger({ accounts: [
   { id:'card', name:'信用卡', kind:'liability', openingBalanceMinor:12500, balanceMinor:12500, includeInTotal:true, archivedAt:null }
 ], transactions: [], appliedOperationIds: [] });
 
-const viewTitles = { overview:'概览', entries:'账目', accounts:'账户' };
+const viewTitles = { overview:'概览', entries:'账目', accounts:'账户', items:'物品' };
 const walletIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg>';
 const chevronIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 6l6 6l-6 6"/></svg>';
 
-let ledger = hydrate();
+const hydratedLocal = hydrate();
+let ledger = hydratedLocal.ledger;
+let itemsState = hydratedLocal.itemsState;
+let localItemMedia = new Map(hydratedLocal.itemMedia.map(media => [media.id, media]));
 let saveLocked = false;
 let pendingOperationId = uid('op');
+let pendingAccountOperationId = uid('account');
 let toastTimer;
 let selectedMonth = today().slice(0, 7);
 let activeView = 'overview';
@@ -40,14 +55,42 @@ let pendingInvite = null;
 let stopUserWatch = null;
 let stopHouseholdWatch = null;
 let stopInviteWatch = null;
+let stopItemsWatch = null;
+let stopItemPaymentsWatch = null;
+let cloudSessionToken = null;
+let currentListenerToken = null;
+let desiredHouseholdId = null;
+let householdSwitchPreviousId = null;
+let householdSwitchHasSnapshot = false;
+let cloudRawState = null;
+let itemRecords = displayItemsFromLocal(itemsState);
+let currentItemPayments = [];
+let selectedItemId = null;
+let itemFilter = 'active';
+let itemListenerError = null;
+let mediaCache = new Map(hydratedLocal.itemMedia.map(media => [`local/${media.id}`, media]));
+let coverObserver = null;
+let pendingItemCreate = null;
+let pendingPayment = null;
+let pendingItemEdit = null;
+let requestedPaymentId = null;
+const mediaLoads = new Map();
+const itemActionOperations = new Map();
+
+const syncCoordinator = createSyncCoordinator({
+  applyOperation:mergePendingLedgerPatch,
+  hasOperation:rawSnapshotHasOperation,
+  recover:async ({ listenerToken }) => {
+    if (!desiredHouseholdId || listenerToken !== currentListenerToken) return;
+    restartHouseholdListener(listenerToken, desiredHouseholdId);
+    restartItemsListener(desiredHouseholdId);
+    if (selectedItemId && $('#itemDetailDialog').open) restartItemPaymentsListener(desiredHouseholdId, selectedItemId);
+  },
+  onChange:applyCoordinatorState
+});
 
 function hydrate() {
-  try {
-    const raw = localStorage.getItem(STORE);
-    return raw ? createLedger(JSON.parse(raw)) : seed();
-  } catch {
-    return seed();
-  }
+  return hydrateLocalEnvelope(localStorage.getItem(STORE), seed());
 }
 
 function hydrateEntryPreferences() {
@@ -70,7 +113,9 @@ function hydrateEntryPreferences() {
 }
 
 function persist() {
-  if (runtimeMode === 'local') localStorage.setItem(STORE, JSON.stringify(serialiseLedger(ledger)));
+  if (runtimeMode === 'local') {
+    localStorage.setItem(STORE, JSON.stringify(serialiseLocalEnvelope(ledger, itemsState, [...localItemMedia.values()])));
+  }
 }
 
 function showApp() {
@@ -86,9 +131,56 @@ function showAuth(message) {
   $('#bottomNav').hidden = true;
 }
 
-function setSyncState(message, bad = false) {
-  $('#syncBadge').textContent = message;
-  $('#syncBadge').classList.toggle('bad', bad);
+function setSyncState(message, bad = false, state = '') {
+  const badge = $('#syncBadge');
+  badge.textContent = message;
+  badge.classList.toggle('bad', bad);
+  badge.dataset.state = state;
+}
+
+function renderSyncStatus(state = syncCoordinator.getState()) {
+  if (runtimeMode === 'local') return setSyncState('本机', false, 'local');
+  const status = state.status === 'offline' ? 'offline' : itemListenerError ? 'error' : state.status;
+  const labels = {
+    loading:'载入中', cached:'已缓存', pending:state.pendingCount ? `${state.pendingCount} 项待同步` : '待同步',
+    synced:'已同步', offline:state.pendingCount ? `离线 · ${state.pendingCount} 项排队` : '离线',
+    recovering:'恢复中', error:'同步错误 · 重试'
+  };
+  setSyncState(labels[status] ?? '准备中', status === 'error', status);
+  $('#syncBadge').title = status === 'error' ? (itemListenerError || state.error || '点按重试') : labels[status];
+}
+
+function setSwitching(value) {
+  document.body.classList.toggle('is-switching', value);
+  for (const control of document.querySelectorAll('[data-mutation], #newEntryButton, #newAccountButton, #archiveTransactionButton, #archiveAccountButton')) {
+    control.disabled = Boolean(value);
+  }
+  $('#workspaceSelect').setAttribute('aria-busy', String(Boolean(value)));
+}
+
+function applyCoordinatorState(state) {
+  renderSyncStatus(state);
+  const raw = state.data;
+  if (!raw?.household || raw.household.id !== state.householdId) return;
+  cloudRawState = raw;
+  currentHousehold = raw.household;
+  ledger = deriveLedger({ accounts:raw.accounts, transactions:raw.transactions });
+  const firstForSwitch = !householdSwitchHasSnapshot && desiredHouseholdId === currentHousehold.id;
+  if (firstForSwitch) {
+    householdSwitchHasSnapshot = true;
+    householdSwitchPreviousId = null;
+    setSwitching(false);
+    itemRecords = [];
+    currentItemPayments = [];
+    renderItemsView();
+    restartItemsListener(currentHousehold.id);
+  }
+  $('#inviteMemberButton').hidden = currentHousehold.ownerId !== cloudUser?.uid;
+  $('#privacyNote').textContent = `资料已同步到你的个人 Firebase · ${currentHousehold.name}`;
+  $('#accountPhotoHelp').textContent = '照片会在浏览器内裁切压缩，并同步给这个账本的家庭成员。';
+  if (!pendingInvite) showApp();
+  render();
+  setView(activeView, false);
 }
 
 function showDialog(dialog) {
@@ -128,25 +220,43 @@ async function saveTransactionRecord(nextLedger, transactionId) {
   if (usesCloudStore()) await cloud.saveTransaction(currentHousehold.id, entry, cloudUser.uid);
 }
 
-async function applyLedgerChange(nextLedger, cloudWrite) {
-  const previous = ledger;
-  try {
-    if (usesCloudStore()) {
-      setSyncState('保存中');
-      await cloudWrite(nextLedger);
-      setSyncState('已同步');
-    }
+function pendingLedgerPatch(nextLedger, kind, recordId, operationId, override = null) {
+  const record = override ?? (kind === 'accountPatch'
+    ? nextLedger.accounts.find(item => item.id === recordId)
+    : nextLedger.transactions.find(item => item.id === recordId));
+  if (!record) throw new Error('无法建立待同步记录');
+  return { kind, record:structuredClone(record), operationId };
+}
+
+async function applyLedgerChange(nextLedger, cloudWrite, pendingPatch = null) {
+  if (!usesCloudStore()) {
     ledger = nextLedger;
     persist();
     render();
+    return;
+  }
+  if (!pendingPatch?.operationId) throw new Error('云端写入缺少稳定 operationId');
+  const token = syncCoordinator.registerWrite(pendingPatch.operationId, pendingPatch, { householdId:currentHousehold.id });
+  let writePromise;
+  try {
+    // Start Firestore immediately, but do not await its server acknowledgement before local echo.
+    writePromise = cloudWrite(nextLedger);
   } catch (error) {
-    ledger = previous;
-    setSyncState('同步失败', true);
+    syncCoordinator.rejectWrite(token, error);
     throw error;
   }
+  ledger = nextLedger;
+  render();
+  Promise.resolve(writePromise).then(
+    () => syncCoordinator.acknowledgeWrite(token),
+    error => {
+      if (syncCoordinator.rejectWrite(token, error)) showToast(`未能同步：${error.message}`);
+    }
+  );
 }
 function activeAccounts() { return ledger.accounts.filter(account => !account.archivedAt); }
 function accountById(id) { return ledger.accounts.find(account => account.id === id) || null; }
+function itemById(id) { return itemRecords.find(item => item.id === id) || null; }
 function liveEntries() { return ledger.transactions.filter(entry => !entry.deletedAt && !entry.purgedAt); }
 function selectedEntries() { return liveEntries().filter(entry => entry.occurredAt.slice(0, 7) === selectedMonth); }
 
@@ -231,11 +341,447 @@ function setView(view, scroll = true) {
   if (scroll) window.scrollTo({ top:0, behavior:'smooth' });
 }
 
+function currentMediaHouseholdId() {
+  return usesCloudStore() ? (currentHousehold?.id ?? desiredHouseholdId) : 'local';
+}
+
+function mediaKey(householdId, mediaId) { return `${householdId}/${mediaId}`; }
+function paymentMode(payment) { return payment?.ledgerMode ?? payment?.mode ?? 'independent'; }
+function paymentIsVoided(payment) { return payment?.status === 'voided' || Boolean(payment?.voidedAt); }
+
+function normalisePayment(payment) {
+  return {
+    ...payment,
+    mode:paymentMode(payment),
+    status:paymentIsVoided(payment) ? 'voided' : 'active'
+  };
+}
+
+async function loadMediaOnce(householdId, mediaId) {
+  if (!householdId || !mediaId) return null;
+  const key = mediaKey(householdId, mediaId);
+  if (mediaCache.has(key)) return mediaCache.get(key);
+  if (mediaLoads.has(key)) return mediaLoads.get(key);
+  const request = Promise.resolve().then(() => householdId === 'local'
+    ? (localItemMedia.get(mediaId) ?? null)
+    : cloud.loadItemMedia(householdId, mediaId)
+  ).then(media => {
+    mediaCache.set(key, media);
+    return media;
+  }).finally(() => mediaLoads.delete(key));
+  mediaLoads.set(key, request);
+  return request;
+}
+
+function observeLazyCovers() {
+  coverObserver?.disconnect();
+  coverObserver = null;
+  const householdId = currentMediaHouseholdId();
+  const targets = [...$('#itemsGrid').querySelectorAll('[data-cover-media-id]')]
+    .filter(target => !mediaCache.has(mediaKey(householdId, target.dataset.coverMediaId)));
+  if (!targets.length) return;
+  const loadTargets = targetsToLoad => Promise.allSettled(targetsToLoad.map(target =>
+    loadMediaOnce(householdId, target.dataset.coverMediaId)
+  )).then(results => {
+    if (householdId !== currentMediaHouseholdId()) return;
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure) $('#itemsMessage').textContent = `封面载入失败：${failure.reason.message}`;
+    renderItemsView();
+  });
+  if (!('IntersectionObserver' in window)) {
+    loadTargets(targets);
+    return;
+  }
+  coverObserver = new IntersectionObserver(entries => {
+    const visible = entries.filter(entry => entry.isIntersecting).map(entry => entry.target);
+    if (!visible.length) return;
+    visible.forEach(target => coverObserver?.unobserve(target));
+    loadTargets(visible);
+  }, { rootMargin:'180px 0px' });
+  targets.forEach(target => coverObserver.observe(target));
+}
+
+function renderItemsView() {
+  if (runtimeMode === 'local') itemRecords = displayItemsFromLocal(itemsState);
+  const visible = itemRecords.filter(item => itemFilter === 'archived'
+    ? item.status === 'archived' || Boolean(item.archivedAt)
+    : item.status !== 'archived' && !item.archivedAt
+  ).sort((a, b) => String(b.updatedAt ?? b.createdAt ?? '').localeCompare(String(a.updatedAt ?? a.createdAt ?? '')));
+  $('#itemsMessage').textContent = itemListenerError ? `物品实时更新中断：${itemListenerError}` : '';
+  $('#itemsGrid').innerHTML = renderItemCards(visible, {
+    formatMoney:formatRM,
+    mediaCache,
+    householdId:currentMediaHouseholdId()
+  });
+  $('#itemsGrid').querySelectorAll('[data-item-id]').forEach(button => {
+    button.addEventListener('click', () => openItemDetail(button.dataset.itemId));
+  });
+  $('#itemsGrid').querySelectorAll('[data-new-item]').forEach(button => {
+    button.addEventListener('click', openNewItem);
+  });
+  observeLazyCovers();
+}
+
+function clearReceipt() {
+  $('#receiptPreview').hidden = true;
+  $('#receiptImage').removeAttribute('src');
+}
+
+async function showReceipt(mediaId, button) {
+  if (!mediaId) return;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '载入中…';
+  $('#itemDetailMessage').textContent = '';
+  try {
+    const media = await loadMediaOnce(currentMediaHouseholdId(), mediaId);
+    if (!media?.dataUrl) throw new Error('找不到付款凭证');
+    $('#receiptImage').src = media.dataUrl;
+    $('#receiptPreview').hidden = false;
+    $('#receiptPreview').scrollIntoView({ behavior:'smooth', block:'nearest' });
+  } catch (error) {
+    $('#itemDetailMessage').textContent = `无法读取凭证：${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+function paymentTimelineMarkup(payments) {
+  if (!payments.length) return '<div class="empty-state"><b>还没有付款</b><p>记录订金或第一期后会显示在这里。</p></div>';
+  return [...payments].sort((a, b) => String(b.occurredAt ?? b.createdAt ?? '').localeCompare(String(a.occurredAt ?? a.createdAt ?? '')))
+    .map(raw => {
+      const payment = normalisePayment(raw);
+      const voided = payment.status === 'voided';
+      const linked = payment.mode === 'linked';
+      const label = payment.type === 'deposit' ? '订金' : '付款';
+      const receipt = payment.receiptMediaId
+        ? `<button class="minor-button" type="button" data-view-receipt="${escapeHtml(payment.receiptMediaId)}">查看凭证</button>` : '';
+      const correction = voided
+        ? `<button class="minor-button" data-restore-payment="${escapeHtml(payment.id)}" type="button">恢复付款</button>`
+        : `<button class="minor-button delete" data-void-payment="${escapeHtml(payment.id)}" type="button">作废付款</button>`;
+      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div><b>${label} · ${formatRM(payment.amountMinor)}</b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${correction}</div></div>`;
+    }).join('');
+}
+
+function renderItemDetail() {
+  const item = normaliseDisplayItem(itemById(selectedItemId));
+  if (!item) {
+    $('#itemDetailMessage').textContent = '物品已不存在或尚未同步。';
+    return;
+  }
+  $('#itemDetailName').textContent = item.name;
+  $('#itemDetailState').textContent = item.status === 'archived' ? '已归档' : item.status === 'completed' ? '已付清' : '收藏中';
+  $('#itemDetailBalance').textContent = formatRM(item.balanceMinor);
+  $('#itemDetailPaid').textContent = `已付 ${formatRM(item.paidMinor)} / ${formatRM(item.fullPriceMinor)}`;
+  $('#itemDetailProgress').style.width = `${item.progress}%`;
+  $('#itemDetailNote').textContent = item.note || '暂无备注';
+  $('#itemDetailMessage').textContent = '';
+  const archived = item.status === 'archived';
+  $('#payItemFullButton').disabled = archived || item.balanceMinor <= 0;
+  $('#payItemPartButton').disabled = archived || item.balanceMinor <= 0;
+  $('#editItemButton').disabled = archived;
+  $('#archiveItemButton').hidden = archived || item.status !== 'completed';
+  $('#restoreItemButton').hidden = !archived;
+  $('#itemPaymentCount').textContent = `${currentItemPayments.length} 笔记录`;
+  $('#itemPaymentTimeline').innerHTML = paymentTimelineMarkup(currentItemPayments);
+  const householdId = currentMediaHouseholdId();
+  const cover = item.coverMediaId ? mediaCache.get(mediaKey(householdId, item.coverMediaId)) : null;
+  $('#itemDetailCover').innerHTML = cover?.dataUrl
+    ? `<img src="${escapeHtml(cover.dataUrl)}" alt="${escapeHtml(item.name)} 封面">`
+    : '<div class="item-cover-placeholder"><span aria-hidden="true">FW</span><small>暂无封面</small></div>';
+  $('#itemPaymentTimeline').querySelectorAll('[data-view-receipt]').forEach(button => {
+    button.addEventListener('click', () => showReceipt(button.dataset.viewReceipt, button));
+  });
+  $('#itemPaymentTimeline').querySelectorAll('[data-void-payment]').forEach(button => {
+    button.addEventListener('click', () => correctItemPayment('void', button.dataset.voidPayment, button));
+  });
+  $('#itemPaymentTimeline').querySelectorAll('[data-restore-payment]').forEach(button => {
+    button.addEventListener('click', () => correctItemPayment('restore', button.dataset.restorePayment, button));
+  });
+  if (requestedPaymentId) {
+    const paymentId = requestedPaymentId;
+    requestedPaymentId = null;
+    setTimeout(() => $('#itemPaymentTimeline').querySelector(`[data-payment-id="${CSS.escape(paymentId)}"]`)?.scrollIntoView({ behavior:'smooth', block:'center' }), 40);
+  }
+}
+
+function restartItemPaymentsListener(householdId, itemId) {
+  stopItemPaymentsWatch?.();
+  stopItemPaymentsWatch = null;
+  if (!usesCloudStore() || !householdId || !itemId || !$('#itemDetailDialog').open) return;
+  stopItemPaymentsWatch = cloud.subscribeItemPayments(householdId, itemId, state => {
+    if (selectedItemId !== itemId || currentMediaHouseholdId() !== householdId || !$('#itemDetailDialog').open) return;
+    currentItemPayments = state.payments.map(normalisePayment);
+    renderItemDetail();
+  }, error => {
+    if (selectedItemId === itemId && $('#itemDetailDialog').open) $('#itemDetailMessage').textContent = `付款时间线更新中断：${error.message}`;
+  });
+}
+
+function cleanupItemDetail() {
+  stopItemPaymentsWatch?.();
+  stopItemPaymentsWatch = null;
+  selectedItemId = null;
+  requestedPaymentId = null;
+  currentItemPayments = [];
+  clearReceipt();
+}
+
+function closeItemDetail(afterClose) {
+  cleanupItemDetail();
+  dismissDialog($('#itemDetailDialog'), afterClose);
+}
+
+function openItemDetail(itemId, paymentId = null) {
+  const item = itemById(itemId);
+  if (!item) {
+    showToast('物品尚未同步或已被移除。');
+    return;
+  }
+  stopItemPaymentsWatch?.();
+  stopItemPaymentsWatch = null;
+  selectedItemId = itemId;
+  requestedPaymentId = paymentId;
+  clearReceipt();
+  currentItemPayments = runtimeMode === 'local'
+    ? itemsState.itemPayments.filter(payment => payment.itemId === itemId).map(normalisePayment)
+    : [];
+  renderItemDetail();
+  if (!$('#itemDetailDialog').open) showDialog($('#itemDetailDialog'));
+  if (usesCloudStore()) restartItemPaymentsListener(currentHousehold.id, itemId);
+  if (item.coverMediaId) {
+    const householdId = currentMediaHouseholdId();
+    loadMediaOnce(householdId, item.coverMediaId).then(() => {
+      if (selectedItemId === itemId && $('#itemDetailDialog').open && householdId === currentMediaHouseholdId()) renderItemDetail();
+    }).catch(error => {
+      if (selectedItemId === itemId) $('#itemDetailMessage').textContent = `封面载入失败：${error.message}`;
+    });
+  }
+}
+
+function openItemFromLedger(itemId, paymentId) {
+  setView('items');
+  openItemDetail(itemId, paymentId);
+}
+
+function upsertItemRecord(raw) {
+  if (!raw) return;
+  const item = normaliseDisplayItem(raw);
+  const index = itemRecords.findIndex(candidate => candidate.id === item.id);
+  if (index >= 0) itemRecords[index] = item;
+  else itemRecords.push(item);
+}
+
+function upsertCurrentPayment(raw) {
+  if (!raw || raw.itemId !== selectedItemId) return;
+  const payment = normalisePayment(raw);
+  const index = currentItemPayments.findIndex(candidate => candidate.id === payment.id);
+  if (index >= 0) currentItemPayments[index] = payment;
+  else currentItemPayments.push(payment);
+}
+
+function applyLinkedExpenseSpec(baseLedger, spec, correctionAt = undefined) {
+  if (!spec) return baseLedger;
+  if (spec.action === 'void') return moveToRecycleBin(baseLedger, spec.transactionId, spec.operationId, correctionAt).ledger;
+  if (spec.action === 'restore') return restoreFromRecycleBin(baseLedger, spec.transactionId, spec.operationId).ledger;
+  return applyLedgerOperation(baseLedger, { ...spec, id:spec.operationId }).ledger;
+}
+
+function commitLocalItemMutation(nextLedger, nextItemsState, nextMedia) {
+  const envelope = serialiseLocalEnvelope(nextLedger, nextItemsState, [...nextMedia.values()]);
+  localStorage.setItem(STORE, JSON.stringify(envelope));
+  ledger = nextLedger;
+  itemsState = nextItemsState;
+  localItemMedia = nextMedia;
+  itemRecords = displayItemsFromLocal(itemsState);
+  mediaCache = new Map([...mediaCache].filter(([key]) => !key.startsWith('local/')));
+  for (const media of localItemMedia.values()) mediaCache.set(mediaKey('local', media.id), media);
+  currentItemPayments = selectedItemId
+    ? itemsState.itemPayments.filter(payment => payment.itemId === selectedItemId).map(normalisePayment)
+    : [];
+  render();
+  if (selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
+}
+
+async function prepareFormMedia(input, kind, pending, slot, statusElement) {
+  const file = input.files?.[0] ?? null;
+  if (!file) return null;
+  if (pending[`${slot}File`] === file && pending[slot]) return pending[slot];
+  statusElement.textContent = kind === 'cover' ? '正在压缩封面…' : '正在压缩凭证…';
+  const compressed = await compressItemMedia(file, kind);
+  const media = { id:pending[`${slot}Id`], ...compressed };
+  pending[`${slot}File`] = file;
+  pending[slot] = media;
+  statusElement.textContent = `已压缩 · ${media.width} × ${media.height}`;
+  return media;
+}
+
+function updateNewItemDepositControls() {
+  const hasDeposit = $('#newItemDepositAmount').value.trim() !== '';
+  $('#newItemLinkControls').hidden = !hasDeposit;
+  $('#newItemAccountRow').hidden = !$('#newItemLinked').checked;
+}
+
+function openNewItem() {
+  if (usesCloudStore() && !navigator.onLine) {
+    showToast('新增物品需要联网。');
+    return;
+  }
+  pendingItemCreate = {
+    itemId:uid('item'), operationId:uid('item-create'), depositPaymentId:uid('item-payment'),
+    depositOperationId:uid('item-deposit'), coverId:uid('item-cover'), receiptId:uid('item-receipt'),
+    createdAt:new Date().toISOString()
+  };
+  $('#newItemForm').reset();
+  populateAccounts();
+  $('#newItemDepositDate').value = today();
+  $('#newItemLinked').checked = true;
+  $('#newItemMessage').textContent = '';
+  $('#newItemCoverStatus').textContent = '浏览器内压缩为独立 JPEG 资料';
+  $('#newItemReceiptStatus').textContent = '仅在请求时读取';
+  $('#saveNewItemButton').disabled = false;
+  updateNewItemDepositControls();
+  showDialog($('#newItemDialog'));
+  setTimeout(() => $('#newItemName').focus(), 30);
+}
+
+function updatePaymentAccountRow() { $('#paymentAccountRow').hidden = !$('#paymentLinked').checked; }
+
+function openPaymentDialog(full = false) {
+  const item = normaliseDisplayItem(itemById(selectedItemId));
+  if (!item || item.status === 'archived' || item.balanceMinor <= 0) return;
+  if (usesCloudStore() && !navigator.onLine) {
+    $('#itemDetailMessage').textContent = '记录付款需要联网。';
+    return;
+  }
+  pendingPayment = {
+    paymentId:uid('item-payment'), operationId:uid('item-payment-op'), receiptId:uid('item-receipt'),
+    createdAt:new Date().toISOString(), full
+  };
+  $('#paymentForm').reset();
+  populateAccounts();
+  $('#paymentDialogTitle').textContent = full ? '一次付清' : '记录一期';
+  $('#paymentBalanceCopy').textContent = `当前余额 ${formatRM(item.balanceMinor)}`;
+  $('#paymentAmount').value = full ? senToAmount(item.balanceMinor) : '';
+  $('#paymentAmount').readOnly = full;
+  $('#paymentDate').value = today();
+  $('#paymentLinked').checked = true;
+  $('#paymentMessage').textContent = '';
+  $('#paymentReceiptStatus').textContent = '会压缩并独立保存';
+  updatePaymentAccountRow();
+  showDialog($('#paymentDialog'));
+  setTimeout(() => (full ? $('#paymentDate') : $('#paymentAmount')).focus(), 30);
+}
+
+function openEditItem() {
+  const item = itemById(selectedItemId);
+  if (!item || item.archivedAt || item.status === 'archived') return;
+  if (usesCloudStore() && !navigator.onLine) {
+    $('#itemDetailMessage').textContent = '编辑物品需要联网。';
+    return;
+  }
+  pendingItemEdit = { operationId:uid('item-edit'), coverId:uid('item-cover'), updatedAt:new Date().toISOString(), originalCoverMediaId:item.coverMediaId ?? null };
+  $('#editItemForm').reset();
+  $('#editItemName').value = item.name;
+  $('#editItemFullPrice').value = senToAmount(item.fullPriceMinor);
+  $('#editItemNote').value = item.note || '';
+  $('#editItemMessage').textContent = '';
+  $('#editItemCoverStatus').textContent = '不选择会保留现有封面';
+  showDialog($('#editItemDialog'));
+}
+
+function actionOperationId(key, prefix) {
+  if (!itemActionOperations.has(key)) itemActionOperations.set(key, uid(prefix));
+  return itemActionOperations.get(key);
+}
+
+async function runItemLifecycle(action, button) {
+  const item = itemById(selectedItemId);
+  if (!item) return;
+  if (usesCloudStore() && !navigator.onLine) {
+    $('#itemDetailMessage').textContent = '此操作需要联网。';
+    return;
+  }
+  const key = `${currentMediaHouseholdId()}:${action}:item:${item.id}`;
+  const operationId = actionOperationId(key, `item-${action}`);
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '处理中…';
+  $('#itemDetailMessage').textContent = '';
+  try {
+    if (usesCloudStore()) {
+      const result = await cloud[action === 'archive' ? 'archiveItem' : 'restoreItem']({
+        householdId:currentHousehold.id, itemId:item.id, operationId,
+        expectedRevision:item.revision, actorUid:cloudUser.uid
+      });
+      upsertItemRecord(result.item);
+    } else {
+      const result = action === 'archive'
+        ? archiveLocalItem(itemsState, item.id, { operationId, expectedRevision:itemsState.revision, actor:'local' })
+        : restoreLocalItem(itemsState, item.id, { operationId, expectedRevision:itemsState.revision, actor:'local' });
+      commitLocalItemMutation(ledger, result.state, new Map(localItemMedia));
+    }
+    itemActionOperations.delete(key);
+    renderItemsView();
+    renderItemDetail();
+    showToast(action === 'archive' ? '物品已归档。' : '物品已恢复到收藏。');
+  } catch (error) {
+    $('#itemDetailMessage').textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function correctItemPayment(action, paymentId, button) {
+  const item = itemById(selectedItemId);
+  const payment = currentItemPayments.find(candidate => candidate.id === paymentId);
+  if (!item || !payment) return;
+  if (usesCloudStore() && !navigator.onLine) {
+    $('#itemDetailMessage').textContent = '更正付款需要联网。';
+    return;
+  }
+  const key = `${currentMediaHouseholdId()}:${action}:payment:${paymentId}`;
+  const operationId = actionOperationId(key, `payment-${action}`);
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '处理中…';
+  $('#itemDetailMessage').textContent = '';
+  try {
+    if (usesCloudStore()) {
+      const result = await cloud[action === 'void' ? 'voidItemPayment' : 'restoreItemPayment']({
+        householdId:currentHousehold.id, itemId:item.id, paymentId, operationId,
+        expectedRevision:item.revision, actorUid:cloudUser.uid
+      });
+      upsertItemRecord(result.item);
+      upsertCurrentPayment(result.payment);
+    } else {
+      const result = action === 'void'
+        ? voidLocalItemPayment(itemsState, item.id, paymentId, { operationId, expectedRevision:itemsState.revision, actor:'local' })
+        : restoreLocalItemPayment(itemsState, item.id, paymentId, { operationId, expectedRevision:itemsState.revision, actor:'local' });
+      const nextLedger = applyLinkedExpenseSpec(ledger, result.expenseSpec, result.payment?.voidedAt ?? result.payment?.restoredAt);
+      commitLocalItemMutation(nextLedger, result.state, new Map(localItemMedia));
+    }
+    itemActionOperations.delete(key);
+    render();
+    renderItemDetail();
+    showToast(action === 'void' ? '付款已作废，相关账目已同步更正。' : '付款与相关账目已恢复。');
+  } catch (error) {
+    $('#itemDetailMessage').textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId = null) {
   if (!entries.length) {
     return `<div class="empty-state"><b>${escapeHtml(emptyTitle)}</b><p>${escapeHtml(emptyBody)}</p><button class="secondary-button" type="button" data-add-entry>记录第一笔</button></div>`;
   }
   return entries.map(entry => {
+    const isLinkedItemPayment = entry.sourceType === 'itemPayment';
+    const linkedItem = isLinkedItemPayment ? itemById(entry.sourceItemId) : null;
     const sign = entry.kind === 'expense' ? '−' : entry.kind === 'income' ? '＋' : '↔';
     let amountClass = entry.kind === 'expense' ? 'expense' : '';
     let amount = entry.kind === 'transfer' ? '转账' : `${entry.kind === 'expense' ? '−' : '＋'}${formatRM(entry.amountMinor)}`;
@@ -244,8 +790,11 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
       amountClass = outgoing ? 'expense' : '';
       amount = `${outgoing ? '−' : '＋'}${formatRM(entry.amountMinor)}`;
     }
-    const metadata = `${dateLabel(entry.occurredAt)} · ${accountFlowLabel(entry)} · ${entry.note || '无备注'}`;
-    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="编辑 ${typeLabel(entry.kind)} ${formatRM(entry.amountMinor)}"><span class="transaction-icon ${entry.kind}">${sign}</span><span class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span></button>`;
+    const metadata = `${dateLabel(entry.occurredAt)} · ${accountFlowLabel(entry)} · ${entry.note || linkedItem?.name || '无备注'}`;
+    const title = isLinkedItemPayment ? `物品付款${linkedItem ? ` · ${linkedItem.name}` : ''}` : (entry.category || typeLabel(entry.kind));
+    const route = isLinkedItemPayment ? ` data-linked-item-id="${escapeHtml(entry.sourceItemId)}" data-linked-payment-id="${escapeHtml(entry.sourcePaymentId)}"` : '';
+    const aria = isLinkedItemPayment ? `查看物品付款 ${linkedItem?.name ?? ''}` : `编辑 ${typeLabel(entry.kind)} ${formatRM(entry.amountMinor)}`;
+    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${sign}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span></button>`;
   }).join('');
 }
 
@@ -313,8 +862,11 @@ function openAccountDetail(accountId) {
 function bindRenderedControls(root = document) {
   root.querySelectorAll('[data-account-id]').forEach(button => button.addEventListener('click', () => openAccountDetail(button.dataset.accountId)));
   root.querySelectorAll('[data-transaction-id]').forEach(button => button.addEventListener('click', () => {
-    if ($('#accountDetailDialog').open) dismissDialog($('#accountDetailDialog'), () => openEntry(button.dataset.transactionId));
-    else openEntry(button.dataset.transactionId);
+    const open = () => button.dataset.linkedItemId
+      ? openItemFromLedger(button.dataset.linkedItemId, button.dataset.linkedPaymentId)
+      : openEntry(button.dataset.transactionId);
+    if ($('#accountDetailDialog').open) dismissDialog($('#accountDetailDialog'), open);
+    else open();
   }));
   root.querySelectorAll('[data-add-entry]').forEach(button => button.addEventListener('click', () => openEntry()));
 }
@@ -348,6 +900,7 @@ function render() {
   const recent = liveEntries().sort(compareEntriesNewestFirst).slice(0, 4);
   $('#recentTransactionList').innerHTML = renderTransactionRows(recent, '还没有最近账目', '记录第一笔支出后，首页会保留最常查看的最近记录。');
   $('#categoryInsightList').innerHTML = renderCategoryInsights(entries);
+  renderItemsView();
 
   bindRenderedControls();
   if (selectedAccountDetailId && $('#accountDetailDialog').open) renderAccountDetail();
@@ -358,6 +911,8 @@ function populateAccounts() {
   const options = activeAccounts().map(account => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${formatRM(account.balanceMinor)}</option>`).join('');
   $('#sourceAccount').innerHTML = options;
   $('#targetAccount').innerHTML = options;
+  $('#newItemAccount').innerHTML = options;
+  $('#paymentAccount').innerHTML = options;
 }
 
 function selectCategory(value = '', focusCustom = false) {
@@ -400,6 +955,10 @@ function openEntry(id = null) {
   const entry = entryId ? ledger.transactions.find(item => item.id === entryId && !item.deletedAt) : null;
   if (entryId && !entry) {
     showToast('该账目已不在可编辑列表。');
+    return;
+  }
+  if (entry?.sourceType === 'itemPayment') {
+    openItemFromLedger(entry.sourceItemId, entry.sourcePaymentId);
     return;
   }
 
@@ -487,6 +1046,7 @@ async function compressAccountPhoto(file) {
 
 function openAccount(id = null) {
   const account = id ? ledger.accounts.find(item => item.id === id) : null;
+  pendingAccountOperationId = uid(account ? 'account-edit' : 'account-create');
   $('#accountForm').reset();
   $('#accountMessage').textContent = '';
   $('#accountPhotoInput').value = '';
@@ -509,44 +1069,323 @@ function renderRecycle() {
   $('#recycleList').innerHTML = deleted.length ? deleted.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">−</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button" data-restore="${escapeHtml(entry.id)}">恢复</button><button class="minor-button delete" data-delete="${escapeHtml(entry.id)}">永久删除</button></div></div></div>`).join('') : '<div class="empty-state"><b>回收站是空的</b><p>移除的账目会先放在这里，方便恢复。</p></div>';
 
   document.querySelectorAll('[data-restore]').forEach(button => button.addEventListener('click', async () => {
-    const result = restoreFromRecycleBin(ledger, button.dataset.restore, uid('restore'));
-    await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, button.dataset.restore));
+    const operationId = uid('restore');
+    const result = restoreFromRecycleBin(ledger, button.dataset.restore, operationId);
+    await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, button.dataset.restore), pendingLedgerPatch(result.ledger, 'transactionPatch', button.dataset.restore, operationId));
     renderRecycle();
     showToast(result.duplicate ? '重复恢复已阻止。' : '已恢复账目并重新核对余额。');
   }));
   document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', async () => {
     const operationId = uid('delete');
+    const prior = ledger.transactions.find(entry => entry.id === button.dataset.delete);
     const result = permanentlyDelete(ledger, button.dataset.delete, operationId);
     await applyLedgerChange(result.ledger, async () => {
       if (usesCloudStore()) await cloud.purgeTransaction(currentHousehold.id, button.dataset.delete, operationId);
-    });
+    }, pendingLedgerPatch(result.ledger, 'transactionPatch', button.dataset.delete, operationId, { ...prior, purgedAt:new Date().toISOString(), lastOperationId:operationId }));
     renderRecycle();
     showToast(result.duplicate ? '重复删除已阻止。' : '已永久移除这笔账目。');
   }));
 }
 
-function exportLocal() {
-  const payload = { exportedAt:new Date().toISOString(), scope:'local-demo-only', ledger:serialiseLedger(ledger) };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = `family-wallet-local-export-${today()}.json`;
-  link.click();
-  URL.revokeObjectURL(link.href);
-  showToast('已导出本地 JSON；不会上传任何数据。');
+async function exportLocal() {
+  const button = $('#exportButton');
+  button.disabled = true;
+  $('#settingsMessage').textContent = '';
+  try {
+    const payments = usesCloudStore()
+      ? await cloud.loadAllItemPayments(currentHousehold.id)
+      : serialiseItemsState(itemsState).itemPayments;
+    const payload = withoutMediaDataUrls({
+      schemaVersion:2,
+      exportedAt:new Date().toISOString(),
+      household:usesCloudStore() ? { id:currentHousehold.id, name:currentHousehold.name } : { id:'local', name:'本机账本' },
+      ledger:serialiseLedger(ledger),
+      items:itemRecords,
+      itemPayments:payments
+    });
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `family-wallet-backup-${today()}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    dismissDialog($('#settingsDialog'));
+    showToast('已导出 schemaVersion 2 资料；照片内容未包含。');
+  } catch (error) {
+    $('#settingsMessage').textContent = `无法导出：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function requestDialogClose(dialog) {
+  if (dialog?.id === 'itemDetailDialog') closeItemDetail();
+  else dismissDialog(dialog);
 }
 
 document.querySelectorAll('[data-view-target]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewTarget)));
-document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => dismissDialog($(`#${button.dataset.closeDialog}`))));
+document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => requestDialogClose($(`#${button.dataset.closeDialog}`))));
 document.querySelectorAll('dialog').forEach(dialog => {
   dialog.addEventListener('click', event => {
-    if (event.target === dialog) dismissDialog(dialog);
+    if (event.target === dialog) requestDialogClose(dialog);
   });
   dialog.addEventListener('cancel', event => {
     event.preventDefault();
-    dismissDialog(dialog);
+    requestDialogClose(dialog);
   });
 });
+$('#moreButton').addEventListener('click', () => {
+  $('#settingsMessage').textContent = '';
+  showDialog($('#settingsDialog'));
+});
+$('#syncBadge').addEventListener('click', () => {
+  if (runtimeMode === 'local') {
+    showToast('本机模式不需要云端同步。');
+    return;
+  }
+  itemListenerError = null;
+  renderSyncStatus();
+  syncCoordinator.requestRecovery('manual');
+});
+$('#newItemButton').addEventListener('click', openNewItem);
+document.querySelectorAll('input[name="itemsFilter"]').forEach(input => input.addEventListener('change', event => {
+  itemFilter = event.target.value;
+  renderItemsView();
+}));
+$('#newItemDepositAmount').addEventListener('input', updateNewItemDepositControls);
+$('#newItemLinked').addEventListener('change', updateNewItemDepositControls);
+$('#paymentLinked').addEventListener('change', updatePaymentAccountRow);
+$('#payItemFullButton').addEventListener('click', () => openPaymentDialog(true));
+$('#payItemPartButton').addEventListener('click', () => openPaymentDialog(false));
+$('#editItemButton').addEventListener('click', openEditItem);
+$('#archiveItemButton').addEventListener('click', event => runItemLifecycle('archive', event.currentTarget));
+$('#restoreItemButton').addEventListener('click', event => runItemLifecycle('restore', event.currentTarget));
+$('#closeReceiptButton').addEventListener('click', clearReceipt);
+$('#editItemCover').addEventListener('change', event => {
+  if (event.target.files?.length) $('#editItemRemoveCover').checked = false;
+  if (pendingItemEdit) {
+    pendingItemEdit.cover = null;
+    pendingItemEdit.coverFile = null;
+  }
+});
+$('#editItemRemoveCover').addEventListener('change', event => {
+  if (event.target.checked) {
+    $('#editItemCover').value = '';
+    if (pendingItemEdit) {
+      pendingItemEdit.cover = null;
+      pendingItemEdit.coverFile = null;
+    }
+  }
+});
+
+$('#newItemForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!pendingItemCreate) return;
+  const button = $('#saveNewItemButton');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '保存中…';
+  $('#newItemMessage').textContent = '';
+  try {
+    if (usesCloudStore() && !navigator.onLine) throw new Error('新增物品需要联网');
+    const depositText = $('#newItemDepositAmount').value.trim();
+    const hasDeposit = depositText !== '';
+    if (!hasDeposit && $('#newItemReceipt').files?.length) throw new Error('请先填写订金金额，再附上订金凭证');
+    const fullPriceMinor = amountToSen($('#newItemFullPrice').value);
+    const depositAmountMinor = hasDeposit ? amountToSen(depositText) : 0;
+    if (depositAmountMinor > fullPriceMinor) throw new Error('订金不能超过物品全价');
+    const linked = hasDeposit && $('#newItemLinked').checked;
+    const accountId = linked ? $('#newItemAccount').value : null;
+    if (linked && !accountId) throw new Error('请选择付款账户，或关闭账目联动');
+    const cover = await prepareFormMedia($('#newItemCover'), 'cover', pendingItemCreate, 'cover', $('#newItemCoverStatus'));
+    const receipt = hasDeposit
+      ? await prepareFormMedia($('#newItemReceipt'), 'receipt', pendingItemCreate, 'receipt', $('#newItemReceiptStatus'))
+      : null;
+    const deposit = hasDeposit ? {
+      paymentId:pendingItemCreate.depositPaymentId,
+      operationId:pendingItemCreate.depositOperationId,
+      amountMinor:depositAmountMinor,
+      occurredAt:`${$('#newItemDepositDate').value || today()}T12:00:00.000Z`,
+      note:$('#newItemDepositNote').value.trim(),
+      accountId,
+      mode:linked ? 'linked' : 'independent',
+      ledgerMode:linked ? 'linked' : 'independent',
+      receiptMedia:receipt,
+      receiptMediaId:receipt?.id ?? null,
+      actor:'local'
+    } : null;
+    if (usesCloudStore()) {
+      const result = await cloud.createItem({
+        householdId:currentHousehold.id,
+        itemId:pendingItemCreate.itemId,
+        operationId:pendingItemCreate.operationId,
+        actorUid:cloudUser.uid,
+        createdAt:pendingItemCreate.createdAt,
+        name:$('#newItemName').value.trim(),
+        note:$('#newItemNote').value.trim(),
+        fullPriceMinor,
+        coverMedia:cover,
+        deposit
+      });
+      upsertItemRecord(result.item);
+      if (cover) mediaCache.set(mediaKey(currentHousehold.id, cover.id), cover);
+      render();
+    } else {
+      const result = createLocalItem(itemsState, {
+        id:pendingItemCreate.itemId,
+        operationId:pendingItemCreate.operationId,
+        expectedRevision:itemsState.revision,
+        createdAt:pendingItemCreate.createdAt,
+        actor:'local',
+        name:$('#newItemName').value.trim(),
+        note:$('#newItemNote').value.trim(),
+        fullPriceMinor,
+        coverMediaId:cover?.id ?? null,
+        deposit:deposit ? { ...deposit, receiptMedia:undefined } : null
+      });
+      const nextLedger = applyLinkedExpenseSpec(ledger, result.expenseSpec);
+      const nextMedia = new Map(localItemMedia);
+      if (cover) nextMedia.set(cover.id, { ...cover, itemId:pendingItemCreate.itemId, paymentId:null, kind:'cover' });
+      if (receipt) nextMedia.set(receipt.id, { ...receipt, itemId:pendingItemCreate.itemId, paymentId:pendingItemCreate.depositPaymentId, kind:'receipt' });
+      commitLocalItemMutation(nextLedger, result.state, nextMedia);
+    }
+    pendingItemCreate = null;
+    dismissDialog($('#newItemDialog'));
+    setView('items');
+    showToast(hasDeposit ? '物品与订金已保存。' : '物品已保存。');
+  } catch (error) {
+    $('#newItemMessage').textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
+
+$('#paymentForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!pendingPayment || !selectedItemId) return;
+  const button = $('#savePaymentButton');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '保存中…';
+  $('#paymentMessage').textContent = '';
+  const wasFull = pendingPayment.full;
+  try {
+    if (usesCloudStore() && !navigator.onLine) throw new Error('记录付款需要联网');
+    const item = normaliseDisplayItem(itemById(selectedItemId));
+    if (!item || item.status === 'archived') throw new Error('物品不可付款');
+    const amountMinor = pendingPayment.full ? item.balanceMinor : amountToSen($('#paymentAmount').value);
+    if (amountMinor <= 0 || amountMinor > item.balanceMinor) throw new Error('付款金额不能超过当前余额');
+    if (pendingPayment.full) $('#paymentAmount').value = senToAmount(amountMinor);
+    const linked = $('#paymentLinked').checked;
+    const accountId = linked ? $('#paymentAccount').value : null;
+    if (linked && !accountId) throw new Error('请选择付款账户，或关闭账目联动');
+    const receipt = await prepareFormMedia($('#paymentReceipt'), 'receipt', pendingPayment, 'receipt', $('#paymentReceiptStatus'));
+    const input = {
+      householdId:currentHousehold?.id,
+      itemId:item.id,
+      paymentId:pendingPayment.paymentId,
+      operationId:pendingPayment.operationId,
+      expectedRevision:usesCloudStore() ? item.revision : itemsState.revision,
+      actorUid:cloudUser?.uid,
+      actor:'local',
+      createdAt:pendingPayment.createdAt,
+      amountMinor,
+      type:'payment',
+      occurredAt:`${$('#paymentDate').value || today()}T12:00:00.000Z`,
+      note:$('#paymentNote').value.trim(),
+      accountId,
+      mode:linked ? 'linked' : 'independent',
+      ledgerMode:linked ? 'linked' : 'independent',
+      receiptMedia:receipt,
+      receiptMediaId:receipt?.id ?? null
+    };
+    if (usesCloudStore()) {
+      const result = await cloud.addItemPayment(input);
+      upsertItemRecord(result.item);
+      upsertCurrentPayment(result.payment);
+      render();
+      renderItemDetail();
+    } else {
+      const result = recordLocalItemPayment(itemsState, item.id, { ...input, receiptMedia:undefined });
+      const nextLedger = applyLinkedExpenseSpec(ledger, result.expenseSpec);
+      const nextMedia = new Map(localItemMedia);
+      if (receipt) nextMedia.set(receipt.id, { ...receipt, itemId:item.id, paymentId:pendingPayment.paymentId, kind:'receipt' });
+      commitLocalItemMutation(nextLedger, result.state, nextMedia);
+    }
+    pendingPayment = null;
+    dismissDialog($('#paymentDialog'));
+    showToast(wasFull ? '物品已付清。' : '付款已保存。');
+  } catch (error) {
+    $('#paymentMessage').textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
+
+$('#editItemForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!pendingItemEdit || !selectedItemId) return;
+  const button = $('#saveEditItemButton');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '保存中…';
+  $('#editItemMessage').textContent = '';
+  try {
+    if (usesCloudStore() && !navigator.onLine) throw new Error('编辑物品需要联网');
+    const item = itemById(selectedItemId);
+    if (!item) throw new Error('物品不存在');
+    const cover = await prepareFormMedia($('#editItemCover'), 'cover', pendingItemEdit, 'cover', $('#editItemCoverStatus'));
+    const removeCover = !cover && $('#editItemRemoveCover').checked;
+    const changes = {
+      name:$('#editItemName').value.trim(),
+      note:$('#editItemNote').value.trim(),
+      fullPriceMinor:amountToSen($('#editItemFullPrice').value)
+    };
+    if (cover) changes.coverMediaId = cover.id;
+    else if (removeCover) changes.coverMediaId = null;
+    if (usesCloudStore()) {
+      const result = await cloud.editItem({
+        householdId:currentHousehold.id,
+        itemId:item.id,
+        operationId:pendingItemEdit.operationId,
+        expectedRevision:item.revision,
+        actorUid:cloudUser.uid,
+        updatedAt:pendingItemEdit.updatedAt,
+        changes,
+        coverMedia:cover
+      });
+      if (pendingItemEdit.originalCoverMediaId && pendingItemEdit.originalCoverMediaId !== result.item.coverMediaId) {
+        mediaCache.delete(mediaKey(currentHousehold.id, pendingItemEdit.originalCoverMediaId));
+      }
+      if (cover) mediaCache.set(mediaKey(currentHousehold.id, cover.id), cover);
+      upsertItemRecord(result.item);
+      render();
+      renderItemDetail();
+    } else {
+      const result = editLocalItem(itemsState, item.id, changes, {
+        operationId:pendingItemEdit.operationId,
+        expectedRevision:itemsState.revision,
+        actor:'local',
+        updatedAt:pendingItemEdit.updatedAt
+      });
+      const nextMedia = new Map(localItemMedia);
+      if ((cover || removeCover) && pendingItemEdit.originalCoverMediaId) nextMedia.delete(pendingItemEdit.originalCoverMediaId);
+      if (cover) nextMedia.set(cover.id, { ...cover, itemId:item.id, paymentId:null, kind:'cover' });
+      commitLocalItemMutation(ledger, result.state, nextMedia);
+    }
+    pendingItemEdit = null;
+    dismissDialog($('#editItemDialog'));
+    showToast('物品资料已更新。');
+  } catch (error) {
+    $('#editItemMessage').textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
+
 $('#newEntryButton').addEventListener('click', () => openEntry());
 $('#newAccountButton').addEventListener('click', () => openAccount());
 $('#editAccountFromDetailButton').addEventListener('click', () => {
@@ -629,8 +1468,9 @@ $('#entryForm').addEventListener('submit', async event => {
     };
     const result = editingTransactionId
       ? updateTransaction(ledger, editingTransactionId, changes, pendingOperationId)
-      : applyOperation(ledger, { id:pendingOperationId, ...changes });
-    await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, editingTransactionId || pendingOperationId));
+      : applyLedgerOperation(ledger, { id:pendingOperationId, ...changes });
+    const transactionId = editingTransactionId || pendingOperationId;
+    await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', transactionId, pendingOperationId));
     rememberEntryPreferences(kind, changes.accountId, changes.targetAccountId);
     dismissDialog($('#entryDialog'));
     if (!editingTransactionId) setView('entries');
@@ -645,8 +1485,9 @@ $('#entryForm').addEventListener('submit', async event => {
 $('#archiveTransactionButton').addEventListener('click', async () => {
   const editingTransactionId = $('#editingTransactionId').value;
   if (!editingTransactionId) return;
-  const result = moveToRecycleBin(ledger, editingTransactionId, uid('recycle'));
-  await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, editingTransactionId));
+  const operationId = uid('recycle');
+  const result = moveToRecycleBin(ledger, editingTransactionId, operationId);
+  await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, editingTransactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', editingTransactionId, operationId));
   dismissDialog($('#entryDialog'));
   setView('entries');
   showToast(result.duplicate ? '重复回收已阻止。' : '已移入回收站，余额已重新核对。');
@@ -668,7 +1509,7 @@ $('#accountForm').addEventListener('submit', async event => {
       photoDataUrl:pendingAccountPhotoDataUrl
     });
     const accountId = id || nextLedger.accounts.at(-1).id;
-    await applyLedgerChange(nextLedger, next => saveAccountRecord(next, accountId));
+    await applyLedgerChange(nextLedger, next => saveAccountRecord(next, accountId), pendingLedgerPatch(nextLedger, 'accountPatch', accountId, pendingAccountOperationId));
     dismissDialog($('#accountDialog'));
     setView('accounts');
     showToast(id ? '账户设置已保存。' : '新账户已加入当前账本。');
@@ -681,61 +1522,134 @@ $('#archiveAccountButton').addEventListener('click', async () => {
   const id = $('#editingAccountId').value;
   if (!id) return;
   const nextLedger = archiveAccount(ledger, id);
-  await applyLedgerChange(nextLedger, next => saveAccountRecord(next, id));
+  await applyLedgerChange(nextLedger, next => saveAccountRecord(next, id), pendingLedgerPatch(nextLedger, 'accountPatch', id, pendingAccountOperationId));
   dismissDialog($('#accountDialog'));
   setView('accounts');
   showToast('账户已归档，并从家庭净额排除。');
 });
 
-async function openCloudHousehold(householdId) {
+function stopItemListeners() {
+  stopItemsWatch?.();
+  stopItemPaymentsWatch?.();
+  stopItemsWatch = stopItemPaymentsWatch = null;
+  coverObserver?.disconnect();
+  coverObserver = null;
+}
+
+function restartHouseholdListener(listenerToken, householdId) {
   stopHouseholdWatch?.();
-  currentHousehold = null;
-  setSyncState('同步中');
   stopHouseholdWatch = cloud.subscribeHousehold(householdId, state => {
-    currentHousehold = state.household;
-    ledger = deriveLedger({ accounts: state.accounts, transactions: state.transactions });
-    $('#inviteMemberButton').hidden = currentHousehold.ownerId !== cloudUser.uid;
-    $('#privacyNote').textContent = `资料已同步到你的个人 Firebase · ${currentHousehold.name}`;
-    $('#accountPhotoHelp').textContent = '照片会在浏览器内裁切压缩，并同步给这个账本的家庭成员。';
-    setSyncState('已同步');
-    if (!pendingInvite) showApp();
-    render();
-    setView(activeView, false);
+    if (listenerToken !== currentListenerToken || householdId !== desiredHouseholdId) return;
+    const { metadata, ...raw } = state;
+    syncCoordinator.acceptSnapshot(listenerToken, raw, metadata);
   }, error => {
-    setSyncState('同步失败', true);
-    showAuth(`无法读取这个账本：${error.message}`);
+    if (listenerToken !== currentListenerToken || householdId !== desiredHouseholdId) return;
+    const failedBeforeFirstSnapshot = !householdSwitchHasSnapshot;
+    syncCoordinator.listenerError(listenerToken, error);
+    if (failedBeforeFirstSnapshot && householdSwitchPreviousId) {
+      const rollbackId = householdSwitchPreviousId;
+      householdSwitchPreviousId = null;
+      desiredHouseholdId = rollbackId;
+      householdSwitchHasSnapshot = false;
+      currentListenerToken = syncCoordinator.activateHousehold(cloudSessionToken, rollbackId);
+      $('#workspaceSelect').value = rollbackId;
+      restartHouseholdListener(currentListenerToken, rollbackId);
+      showToast(`无法切换账本，已返回原账本：${error.message}`);
+      return;
+    }
+    setSwitching(false);
+    if (!currentHousehold) showAuth(`无法读取这个账本：${error.message}`);
+    else showToast(`实时同步暂时中断：${error.message}`);
   });
 }
 
-async function applyCloudProfile(profile) {
-  if (!profile) return;
+function restartItemsListener(householdId) {
+  stopItemsWatch?.();
+  stopItemsWatch = null;
+  if (!usesCloudStore() || !householdId || householdId !== desiredHouseholdId) return;
+  stopItemsWatch = cloud.subscribeItems(householdId, state => {
+    if (householdId !== desiredHouseholdId || currentHousehold?.id !== householdId) return;
+    itemListenerError = null;
+    itemRecords = state.items.map(normaliseDisplayItem);
+    renderSyncStatus();
+    renderItemsView();
+    if (selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
+  }, error => {
+    if (householdId !== desiredHouseholdId) return;
+    itemListenerError = error.message;
+    renderSyncStatus();
+    $('#itemsMessage').textContent = `物品实时更新中断：${error.message}`;
+  });
+}
+
+function switchCloudHousehold(householdId, { persistSelection = false } = {}) {
+  if (!cloudSessionToken || !householdId || householdId === desiredHouseholdId && currentListenerToken) return;
+  householdSwitchPreviousId = currentHousehold?.id ?? null;
+  desiredHouseholdId = householdId;
+  householdSwitchHasSnapshot = false;
+  itemListenerError = null;
+  setSwitching(true);
+  setSyncState('切换中', false, 'loading');
+  stopItemListeners();
+  if ($('#itemDetailDialog').open) closeItemDetail();
+  currentListenerToken = syncCoordinator.activateHousehold(cloudSessionToken, householdId);
+  restartHouseholdListener(currentListenerToken, householdId);
+  if (persistSelection && cloudUser) {
+    cloud.selectHousehold(cloudUser.uid, householdId).catch(error => {
+      if (householdId === desiredHouseholdId) showToast(`账本已切换，但偏好保存失败：${error.message}`);
+    });
+  }
+}
+
+async function applyCloudProfile(profile, sessionToken = cloudSessionToken) {
+  if (!profile || sessionToken !== cloudSessionToken || sessionToken?.sessionGeneration !== syncCoordinator.getState().sessionGeneration) return;
   cloudProfile = profile;
   const options = await cloud.householdOptions(profile.householdIds || []);
-  const selected = options.some(option => option.id === profile.selectedHouseholdId)
-    ? profile.selectedHouseholdId
-    : options[0]?.id;
+  if (sessionToken !== cloudSessionToken) return;
+  const selected = options.some(option => option.id === profile.selectedHouseholdId) ? profile.selectedHouseholdId : options[0]?.id;
   $('#workspaceSelect').innerHTML = options.map(option => `<option value="${escapeHtml(option.id)}">${escapeHtml(option.name)}</option>`).join('');
-  $('#workspaceSelect').value = selected || '';
-  if (selected && currentHousehold?.id !== selected) await openCloudHousehold(selected);
+  $('#workspaceSelect').value = desiredHouseholdId || selected || '';
+  // Profile snapshots update options, but a direct user switch owns navigation until fenced completion.
+  if (selected && !desiredHouseholdId) switchCloudHousehold(selected);
 }
 
 async function handleCloudUser(user) {
   stopUserWatch?.();
   stopInviteWatch?.();
   stopHouseholdWatch?.();
+  stopItemListeners();
+  if ($('#itemDetailDialog').open) {
+    cleanupItemDetail();
+    $('#itemDetailDialog').close();
+  }
   stopUserWatch = stopInviteWatch = stopHouseholdWatch = null;
   currentHousehold = null;
+  desiredHouseholdId = null;
+  currentListenerToken = null;
+  cloudRawState = null;
   cloudUser = user;
   pendingInvite = null;
   $('#pendingInvitePanel').hidden = true;
   if (!user) {
+    cloudSessionToken = null;
+    syncCoordinator.signOut();
     showAuth(runtimeMode === 'emulator' ? '请使用测试帐号登录。' : '使用你自己的 Google 帐号登录。');
     return;
   }
+  cloudSessionToken = syncCoordinator.beginSession();
+  syncCoordinator.setOnline(navigator.onLine);
   showAuth('正在打开你的账本…');
   const profile = await cloud.ensureWorkspace(user);
-  stopUserWatch = cloud.watchUser(user.uid, value => applyCloudProfile(value).catch(error => showAuth(error.message)), error => showAuth(error.message));
+  const sessionToken = cloudSessionToken;
+  stopUserWatch = cloud.watchUser(user.uid, value => applyCloudProfile(value, sessionToken).catch(error => {
+    if (!currentHousehold && sessionToken === cloudSessionToken) showAuth(error.message);
+    else showToast(error.message);
+  }), error => {
+    if (!currentHousehold && sessionToken === cloudSessionToken) showAuth(error.message);
+    else showToast(`个人资料监听中断：${error.message}`);
+  });
   stopInviteWatch = cloud.watchInvite(user.email, invite => {
+    if (sessionToken !== cloudSessionToken) return;
     pendingInvite = invite;
     if (invite) {
       $('#pendingInviteTitle').textContent = '收到家庭邀请';
@@ -743,15 +1657,36 @@ async function handleCloudUser(user) {
       $('#pendingInvitePanel').hidden = false;
       showAuth(`你已使用 ${user.email} 登录。`);
     }
-  }, error => showAuth(error.message));
-  await applyCloudProfile(profile);
+  }, error => currentHousehold ? showToast(error.message) : showAuth(error.message));
+  await applyCloudProfile(profile, sessionToken);
+}
+
+let googleSignInPending = false;
+
+function googleSignInErrorMessage(error) {
+  if (error?.code === 'auth/popup-closed-by-user') return 'Google 登录窗口已关闭，请再试一次。';
+  if (error?.code === 'auth/cancelled-popup-request') return '上一轮 Google 登录仍在处理，请稍后再试。';
+  return `Google 登录失败：${error?.message || '未知错误'}`;
 }
 
 $('#googleSignInButton').addEventListener('click', async () => {
-  $('#googleSignInButton').disabled = true;
-  try { await cloud.signInGoogle(); }
-  catch (error) { showAuth(`Google 登录失败：${error.message}`); }
-  finally { $('#googleSignInButton').disabled = false; }
+  if (googleSignInPending) return;
+  const button = $('#googleSignInButton');
+  googleSignInPending = true;
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.textContent = '等待 Google 登录…';
+  showAuth('Google 登录窗口已打开，请在该窗口完成登录。');
+  try {
+    await cloud.signInGoogle();
+  } catch (error) {
+    showAuth(googleSignInErrorMessage(error));
+  } finally {
+    googleSignInPending = false;
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    button.textContent = '使用 Google 帐号登录';
+  }
 });
 
 $('#testRegisterButton').addEventListener('click', async () => {
@@ -764,9 +1699,13 @@ $('#testLoginButton').addEventListener('click', async () => {
   catch (error) { showAuth(`测试登录失败：${error.message}`); }
 });
 
-$('#signOutButton').addEventListener('click', () => cloud?.logout());
+$('#signOutButton').addEventListener('click', () => {
+  const logout = () => cloud?.logout();
+  if ($('#settingsDialog').open) dismissDialog($('#settingsDialog'), logout);
+  else logout();
+});
 $('#workspaceSelect').addEventListener('change', event => {
-  if (cloudUser && event.target.value) cloud.selectHousehold(cloudUser.uid, event.target.value).catch(error => showToast(error.message));
+  if (cloudUser && event.target.value) switchCloudHousehold(event.target.value, { persistSelection:true });
 });
 $('#inviteMemberButton').addEventListener('click', () => {
   $('#inviteForm').reset();
@@ -833,17 +1772,35 @@ async function startRuntime() {
   }
   const { createFirebaseWallet } = await import('./firebase-client.js');
   runtimeMode = useEmulators ? 'emulator' : 'cloud';
-  if (useEmulators) {
-    $('#testAuthControls').hidden = false;
-    showAuth('本机 Firebase Emulator：只使用合成测试资料。');
-  } else {
-    runtimeMode = 'cloud';
-    $('#googleSignInButton').hidden = false;
-    showAuth('使用你自己的 Google 帐号登录。');
-  }
+  showAuth(useEmulators ? '正在初始化本机 Firebase Emulator…' : '正在检查 Google 登录状态…');
   cloud = await createFirebaseWallet({ config: firebaseConfig, useEmulators });
-  cloud.onAuthChanged(user => handleCloudUser(user).catch(error => showAuth(error.message)));
+  cloud.onAuthChanged(user => {
+    if (useEmulators) $('#testAuthControls').hidden = false;
+    else $('#googleSignInButton').hidden = Boolean(user);
+    handleCloudUser(user).catch(error => {
+      if (!useEmulators) $('#googleSignInButton').hidden = false;
+      showAuth(error.message);
+    });
+  });
 }
+
+function requestForegroundRecovery(trigger) {
+  if (!usesCloudStore()) return;
+  itemListenerError = null;
+  renderSyncStatus();
+  syncCoordinator.requestRecovery(trigger);
+}
+
+window.addEventListener('online', () => {
+  syncCoordinator.setOnline(true);
+  requestForegroundRecovery('online');
+});
+window.addEventListener('offline', () => syncCoordinator.setOnline(false));
+window.addEventListener('focus', () => requestForegroundRecovery('focus'));
+window.addEventListener('pageshow', () => requestForegroundRecovery('pageshow'));
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestForegroundRecovery('visibility');
+});
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
 startRuntime().catch(error => showAuth(`无法启动：${error.message}`));

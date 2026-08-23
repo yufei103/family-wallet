@@ -12,9 +12,12 @@ A mobile-first household finance PWA for recording income, expenses, transfers a
 - Monthly summaries, account detail and newest-first activity
 - Responsive account-detail pagination (6 per phone page, 10 on larger screens)
 - Account photos compressed in the browser
+- A shared item cabinet for deposits, installments, receipts, balances and manual archive
+- Item payments can atomically create a linked shopping expense or stay independent from the ledger
+- Separate, on-demand compressed item covers and receipt documents; image bytes never enter realtime item/payment listeners
 - Installable Web/iPhone icon assets without the source canvas border
-- Offline PWA shell and local Firestore cache
-- Recycle bin, restore, reconciliation and JSON backup
+- Offline PWA shell, local Firestore cache and truthful cached/pending/offline/recovering sync states
+- Recycle bin, restore, reconciliation and metadata-only JSON export from the low-frequency settings menu
 - Responsive phone and desktop layouts
 
 ## Privacy model
@@ -43,7 +46,7 @@ Create a Firebase Spark project, then:
 5. Register the Web App in Firebase App Check with reCAPTCHA Enterprise and keep enforcement off until the first verified login.
 6. Deploy `firestore.rules` with the Firebase CLI.
 
-Data Connect and Firebase Storage are not required. Compressed account photos are stored inside the authorized Firestore account document.
+Data Connect and Firebase Storage are not required. This project stays compatible with Spark: item covers are compressed to at most about 80 KB and receipts to about 180 KB, then stored in separate authorized Firestore media documents with the image field excluded from indexing. Item and payment list listeners contain metadata only. Account photos remain compressed inside the authorized account document for backward compatibility.
 
 ### 2. Configure GitHub Actions
 
@@ -74,6 +77,7 @@ The workflow injects them into the generated `dist/firebase-config.js`. Producti
 
 4. Reload the App. The approved owner can initialize the personal ledger.
 5. Invite the family member from inside the App. The invited Gmail account may join only that shared household.
+6. Verify both accounts can write, receive realtime updates, recover after foregrounding and reject cross-household access before enabling App Check enforcement.
 
 Do not publish a live link before this owner gate, App Check and the final Rules tests have been verified.
 
@@ -101,6 +105,14 @@ npm run serve
 ```
 
 Use `?local=1` for the device-only demonstration mode. It does not connect to Firebase.
+
+## Item payment and export boundaries
+
+- Linked item payments require an online Firestore transaction. The payment, item balance and deterministic shopping expense succeed or fail together.
+- Independent item payments update only item progress and do not change an account balance or monthly spending.
+- Ordinary income, expense and transfer entry keeps Firestore's offline queue behavior.
+- Payment corrections use void and restore records instead of overwriting history.
+- The settings export contains the selected ledger, item metadata and payment metadata under `schemaVersion: 2`. It excludes image Data URLs, authentication profiles, access records, invitations, membership records and Firebase configuration.
 
 ## Quota ownership
 

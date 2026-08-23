@@ -97,6 +97,12 @@ export function applyOperation(ledger, operation) {
     purgedAt: null,
     deletedAt: null
   };
+  // Linked item-payment provenance is optional and immutable.  Do not add
+  // these keys to ordinary/legacy entries: their persisted shape stays the
+  // same, while clone/derive/edit naturally preserve keys that are present.
+  if (operation.sourceType !== undefined) entry.sourceType = operation.sourceType;
+  if (operation.sourceItemId !== undefined) entry.sourceItemId = operation.sourceItemId;
+  if (operation.sourcePaymentId !== undefined) entry.sourcePaymentId = operation.sourcePaymentId;
   impact(next.accounts, entry, 1);
   next.transactions.push(entry);
   next.appliedOperationIds.add(operation.id);

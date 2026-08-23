@@ -148,3 +148,33 @@ test('月度收支排除转账与回收账目', () => {
   ledger = moveToRecycleBin(ledger, 'food', 'recycle-food').ledger;
   assert.deepEqual(monthlySummary(ledger, '2026-07'), { incomeMinor: 100000, expenseMinor: 0 });
 });
+
+test('物品付款来源字段在创建、派生与编辑后保持不变', () => {
+  const created = applyOperation(seed(), {
+    id: 'pay-item-op', transactionId: 'item-payment-pay-1', kind: 'expense', accountId: 'mbb',
+    amountMinor: 2500, category: '购物', sourceType: 'itemPayment',
+    sourceItemId: 'bike', sourcePaymentId: 'pay-1'
+  }).ledger;
+  const entry = created.transactions[0];
+  assert.deepEqual(
+    [entry.sourceType, entry.sourceItemId, entry.sourcePaymentId],
+    ['itemPayment', 'bike', 'pay-1']
+  );
+  const derived = deriveLedger({ accounts: seed().accounts, transactions: created.transactions });
+  const edited = updateTransaction(derived, entry.id, { note: '保留来源' }, 'edit-linked-note').ledger;
+  assert.deepEqual(
+    edited.transactions.map(({ sourceType, sourceItemId, sourcePaymentId }) => ({ sourceType, sourceItemId, sourcePaymentId })),
+    [{ sourceType: 'itemPayment', sourceItemId: 'bike', sourcePaymentId: 'pay-1' }]
+  );
+});
+
+test('普通旧账目不新增物品付款来源键', () => {
+  const ordinary = applyOperation(seed(), {
+    id: 'ordinary-expense', kind: 'expense', accountId: 'mbb', amountMinor: 100
+  }).ledger.transactions[0];
+  assert.equal(Object.hasOwn(ordinary, 'sourceType'), false);
+  assert.equal(Object.hasOwn(ordinary, 'sourceItemId'), false);
+  assert.equal(Object.hasOwn(ordinary, 'sourcePaymentId'), false);
+  const derived = deriveLedger({ accounts: seed().accounts, transactions: [ordinary] }).transactions[0];
+  assert.equal(Object.hasOwn(derived, 'sourceType'), false);
+});
