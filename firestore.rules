@@ -9,6 +9,11 @@ service cloud.firestore {
     function access(uid) { return get(/databases/$(database)/documents/access/$(uid)); }
     function inviteForCurrentEmail() { return get(/databases/$(database)/documents/invites/$(email())); }
     function inviteAfterCurrentEmail() { return getAfter(/databases/$(database)/documents/invites/$(email())); }
+    function itemPath(householdId, itemId) { return /databases/$(database)/documents/households/$(householdId)/items/$(itemId); }
+    function paymentPath(householdId, paymentId) { return /databases/$(database)/documents/households/$(householdId)/itemPayments/$(paymentId); }
+    function mediaPath(householdId, mediaId) { return /databases/$(database)/documents/households/$(householdId)/itemMedia/$(mediaId); }
+    function transactionPath(householdId, transactionId) { return /databases/$(database)/documents/households/$(householdId)/transactions/$(transactionId); }
+    function accountPath(householdId, accountId) { return /databases/$(database)/documents/households/$(householdId)/accounts/$(accountId); }
     function approvedOwner() {
       return signedIn()
         && access(request.auth.uid).data.active == true
@@ -35,6 +40,303 @@ service cloud.firestore {
         && inviteForCurrentEmail().data.status == 'pending'
         && inviteAfterCurrentEmail().data.status == 'accepted'
         && inviteAfterCurrentEmail().data.acceptedBy == request.auth.uid;
+    }
+    function nonEmpty(value, cap) { return value is string && value.size() > 0 && value.size() <= cap; }
+    function optionalString(value, cap) { return value == null || (value is string && value.size() <= cap); }
+    function safePositiveMoney(value) { return value is int && value > 0 && value <= 9007199254740991; }
+    function safeNonNegativeMoney(value) { return value is int && value >= 0 && value <= 9007199254740991; }
+    function validItemShape(data, householdId, itemId) {
+      return data.keys().hasAll([
+          'id', 'householdId', 'name', 'note', 'fullPriceMinor', 'paidMinor', 'status', 'coverMediaId',
+          'createdByUid', 'createdAt', 'updatedByUid', 'updatedAt', 'archivedAt', 'revision',
+          'lastOperationId', 'lastPaymentId'
+        ])
+        && data.keys().hasOnly([
+          'id', 'householdId', 'name', 'note', 'fullPriceMinor', 'paidMinor', 'status', 'coverMediaId',
+          'createdByUid', 'createdAt', 'updatedByUid', 'updatedAt', 'archivedAt', 'revision',
+          'lastOperationId', 'lastPaymentId'
+        ])
+        && data.id == itemId
+        && data.householdId == householdId
+        && nonEmpty(data.name, 200)
+        && optionalString(data.note, 2000)
+        && safePositiveMoney(data.fullPriceMinor)
+        && safeNonNegativeMoney(data.paidMinor)
+        && data.paidMinor <= data.fullPriceMinor
+        && data.status in ['active', 'completed', 'archived']
+        && (data.coverMediaId == null || nonEmpty(data.coverMediaId, 200))
+        && nonEmpty(data.createdByUid, 200)
+        && nonEmpty(data.createdAt, 100)
+        && nonEmpty(data.updatedByUid, 200)
+        && nonEmpty(data.updatedAt, 100)
+        && (data.archivedAt == null || nonEmpty(data.archivedAt, 100))
+        && data.revision is int && data.revision >= 1
+        && nonEmpty(data.lastOperationId, 200)
+        && (data.lastPaymentId == null || nonEmpty(data.lastPaymentId, 200))
+        && ((data.status == 'archived') == (data.archivedAt != null))
+        && (data.status != 'completed' || data.paidMinor == data.fullPriceMinor)
+        && (data.status != 'active' || data.paidMinor < data.fullPriceMinor);
+    }
+    function validMediaReferenceAfter(householdId, itemId, mediaId, kind, paymentId) {
+      return mediaId == null || (
+        existsAfter(mediaPath(householdId, mediaId))
+        && getAfter(mediaPath(householdId, mediaId)).data.id == mediaId
+        && getAfter(mediaPath(householdId, mediaId)).data.householdId == householdId
+        && getAfter(mediaPath(householdId, mediaId)).data.itemId == itemId
+        && getAfter(mediaPath(householdId, mediaId)).data.kind == kind
+        && getAfter(mediaPath(householdId, mediaId)).data.paymentId == paymentId
+      );
+    }
+    function validItemCreate(data, householdId, itemId) {
+      return validItemShape(data, householdId, itemId)
+        && data.createdByUid == request.auth.uid
+        && data.updatedByUid == request.auth.uid
+        && data.createdAt == data.updatedAt
+        && data.archivedAt == null
+        && data.revision == 1
+        && validMediaReferenceAfter(householdId, itemId, data.coverMediaId, 'cover', null)
+        && (
+          (data.lastPaymentId == null && data.paidMinor == 0 && data.status == 'active')
+          || (
+            data.lastPaymentId != null
+            && !exists(paymentPath(householdId, data.lastPaymentId))
+            && existsAfter(paymentPath(householdId, data.lastPaymentId))
+            && getAfter(paymentPath(householdId, data.lastPaymentId)).data.itemId == itemId
+            && getAfter(paymentPath(householdId, data.lastPaymentId)).data.status == 'active'
+            && getAfter(paymentPath(householdId, data.lastPaymentId)).data.amountMinor == data.paidMinor
+          )
+        );
+    }
+    function immutableItemFields(after, before) {
+      return after.id == before.id
+        && after.householdId == before.householdId
+        && after.createdByUid == before.createdByUid
+        && after.createdAt == before.createdAt;
+    }
+    function itemPaymentMutation(after, before, householdId) {
+      let paymentId = after.lastPaymentId;
+      return paymentId != null
+        && after.diff(before).affectedKeys().hasOnly([
+          'paidMinor', 'status', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId', 'lastPaymentId'
+        ])
+        && before.archivedAt == null && after.archivedAt == null
+        && after.fullPriceMinor == before.fullPriceMinor
+        && after.name == before.name && after.note == before.note && after.coverMediaId == before.coverMediaId
+        && existsAfter(paymentPath(householdId, paymentId))
+        && getAfter(paymentPath(householdId, paymentId)).data.itemId == after.id
+        && getAfter(paymentPath(householdId, paymentId)).data.lastOperationId == after.lastOperationId
+        && getAfter(paymentPath(householdId, paymentId)).data.updatedAt == after.updatedAt
+        && (
+          (
+            !exists(paymentPath(householdId, paymentId))
+            && getAfter(paymentPath(householdId, paymentId)).data.status == 'active'
+            && after.paidMinor == before.paidMinor + getAfter(paymentPath(householdId, paymentId)).data.amountMinor
+          )
+          || (
+            exists(paymentPath(householdId, paymentId))
+            && get(paymentPath(householdId, paymentId)).data.status == 'active'
+            && getAfter(paymentPath(householdId, paymentId)).data.status == 'voided'
+            && after.paidMinor == before.paidMinor - get(paymentPath(householdId, paymentId)).data.amountMinor
+          )
+          || (
+            exists(paymentPath(householdId, paymentId))
+            && get(paymentPath(householdId, paymentId)).data.status == 'voided'
+            && getAfter(paymentPath(householdId, paymentId)).data.status == 'active'
+            && after.paidMinor == before.paidMinor + get(paymentPath(householdId, paymentId)).data.amountMinor
+          )
+        )
+        && after.status == (after.paidMinor == after.fullPriceMinor ? 'completed' : 'active');
+    }
+    function itemMetadataMutation(after, before, householdId) {
+      return after.diff(before).affectedKeys().hasOnly([
+          'name', 'note', 'fullPriceMinor', 'status', 'coverMediaId', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId'
+        ])
+        && after.paidMinor == before.paidMinor
+        && after.lastPaymentId == before.lastPaymentId
+        && before.archivedAt == null && after.archivedAt == null
+        && after.status == (after.paidMinor == after.fullPriceMinor ? 'completed' : 'active')
+        && validMediaReferenceAfter(householdId, after.id, after.coverMediaId, 'cover', null);
+    }
+    function itemArchiveMutation(after, before) {
+      return after.diff(before).affectedKeys().hasOnly([
+          'status', 'archivedAt', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId'
+        ])
+        && after.name == before.name && after.note == before.note
+        && after.fullPriceMinor == before.fullPriceMinor && after.paidMinor == before.paidMinor
+        && after.coverMediaId == before.coverMediaId && after.lastPaymentId == before.lastPaymentId
+        && (
+          (before.archivedAt == null && before.status == 'completed'
+            && before.paidMinor == before.fullPriceMinor
+            && after.status == 'archived' && after.archivedAt != null)
+          || (before.status == 'archived' && before.archivedAt != null
+            && after.archivedAt == null
+            && after.status == (after.paidMinor == after.fullPriceMinor ? 'completed' : 'active'))
+        );
+    }
+    function validItemUpdate(after, before, householdId, itemId) {
+      return validItemShape(after, householdId, itemId)
+        && immutableItemFields(after, before)
+        && after.revision == before.revision + 1
+        && after.updatedByUid == request.auth.uid
+        && (itemPaymentMutation(after, before, householdId)
+          || itemMetadataMutation(after, before, householdId)
+          || itemArchiveMutation(after, before));
+    }
+    function validPaymentShape(data, householdId, paymentId) {
+      return data.keys().hasAll([
+          'id', 'householdId', 'itemId', 'type', 'amountMinor', 'occurredAt', 'note', 'receiptMediaId',
+          'ledgerMode', 'accountId', 'transactionId', 'status', 'actorUid', 'createdAt', 'updatedByUid', 'updatedAt',
+          'voidedAt', 'lastOperationId'
+        ])
+        && data.keys().hasOnly([
+          'id', 'householdId', 'itemId', 'type', 'amountMinor', 'occurredAt', 'note', 'receiptMediaId',
+          'ledgerMode', 'accountId', 'transactionId', 'status', 'actorUid', 'createdAt', 'updatedByUid', 'updatedAt',
+          'voidedAt', 'lastOperationId'
+        ])
+        && data.id == paymentId && data.householdId == householdId
+        && nonEmpty(data.itemId, 200)
+        && data.type in ['deposit', 'payment']
+        && safePositiveMoney(data.amountMinor)
+        && nonEmpty(data.occurredAt, 100)
+        && optionalString(data.note, 2000)
+        && (data.receiptMediaId == null || nonEmpty(data.receiptMediaId, 200))
+        && data.ledgerMode in ['linked', 'independent']
+        && (data.ledgerMode == 'linked'
+          ? (nonEmpty(data.accountId, 200) && data.transactionId == 'item-payment-' + paymentId)
+          : (data.accountId == null && data.transactionId == null))
+        && data.status in ['active', 'voided']
+        && nonEmpty(data.actorUid, 200)
+        && nonEmpty(data.createdAt, 100)
+        && nonEmpty(data.updatedByUid, 200)
+        && nonEmpty(data.updatedAt, 100)
+        && (data.voidedAt == null || nonEmpty(data.voidedAt, 100))
+        && ((data.status == 'voided') == (data.voidedAt != null))
+        && nonEmpty(data.lastOperationId, 200);
+    }
+    function linkedTransactionMatchesPayment(householdId, payment) {
+      return existsAfter(transactionPath(householdId, payment.transactionId))
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.id == payment.transactionId
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.householdId == householdId
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.sourceType == 'itemPayment'
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.sourceItemId == payment.itemId
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.sourcePaymentId == payment.id
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.accountId == payment.accountId
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.amountMinor == payment.amountMinor
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.actorUid == payment.actorUid
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.lastOperationId == payment.lastOperationId
+        && getAfter(transactionPath(householdId, payment.transactionId)).data.deletedAt == payment.voidedAt;
+    }
+    function validPaymentCreate(data, householdId, paymentId) {
+      return validPaymentShape(data, householdId, paymentId)
+        && data.status == 'active' && data.voidedAt == null
+        && data.actorUid == request.auth.uid && data.updatedByUid == request.auth.uid
+        && data.createdAt == data.updatedAt
+        && existsAfter(itemPath(householdId, data.itemId))
+        && getAfter(itemPath(householdId, data.itemId)).data.lastPaymentId == paymentId
+        && (
+          (!exists(itemPath(householdId, data.itemId))
+            && getAfter(itemPath(householdId, data.itemId)).data.createdAt == data.createdAt
+            && getAfter(itemPath(householdId, data.itemId)).data.updatedAt == data.createdAt)
+          || (exists(itemPath(householdId, data.itemId))
+            && getAfter(itemPath(householdId, data.itemId)).data.lastOperationId == data.lastOperationId
+            && getAfter(itemPath(householdId, data.itemId)).data.updatedAt == data.updatedAt)
+        )
+        && validMediaReferenceAfter(householdId, data.itemId, data.receiptMediaId, 'receipt', paymentId)
+        && (data.ledgerMode == 'independent' || linkedTransactionMatchesPayment(householdId, data));
+    }
+    function validPaymentUpdate(after, before, householdId, paymentId) {
+      return validPaymentShape(after, householdId, paymentId)
+        && after.diff(before).affectedKeys().hasOnly(['status', 'updatedByUid', 'updatedAt', 'voidedAt', 'lastOperationId'])
+        && after.id == before.id && after.householdId == before.householdId && after.itemId == before.itemId
+        && after.type == before.type && after.amountMinor == before.amountMinor
+        && after.occurredAt == before.occurredAt && after.note == before.note
+        && after.receiptMediaId == before.receiptMediaId && after.ledgerMode == before.ledgerMode
+        && after.accountId == before.accountId && after.transactionId == before.transactionId
+        && after.actorUid == before.actorUid
+        && after.createdAt == before.createdAt
+        && after.updatedByUid == request.auth.uid
+        && ((before.status == 'active' && after.status == 'voided' && after.voidedAt == after.updatedAt)
+          || (before.status == 'voided' && after.status == 'active' && after.voidedAt == null))
+        && existsAfter(itemPath(householdId, after.itemId))
+        && getAfter(itemPath(householdId, after.itemId)).data.lastPaymentId == paymentId
+        && getAfter(itemPath(householdId, after.itemId)).data.lastOperationId == after.lastOperationId
+        && getAfter(itemPath(householdId, after.itemId)).data.updatedAt == after.updatedAt
+        && (after.ledgerMode == 'independent' || linkedTransactionMatchesPayment(householdId, after));
+    }
+    function validMediaShape(data, householdId, mediaId) {
+      return data.keys().hasAll([
+          'id', 'householdId', 'itemId', 'paymentId', 'kind', 'dataUrl', 'dataUrlLength',
+          'width', 'height', 'createdByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'householdId', 'itemId', 'paymentId', 'kind', 'dataUrl', 'dataUrlLength',
+          'width', 'height', 'createdByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.id == mediaId && data.householdId == householdId
+        && nonEmpty(data.itemId, 200)
+        && data.kind in ['cover', 'receipt']
+        && data.dataUrl is string
+        && data.dataUrl.matches('^data:image/jpeg;base64,[A-Za-z0-9+/=]+$')
+        && data.dataUrlLength is int && data.dataUrlLength == data.dataUrl.size()
+        && data.width is int && data.width > 0
+        && data.height is int && data.height > 0
+        && data.createdByUid == request.auth.uid
+        && nonEmpty(data.createdAt, 100) && data.updatedAt == data.createdAt
+        && (data.kind == 'cover'
+          ? (data.paymentId == null && data.dataUrlLength <= 80000 && data.width <= 512 && data.height <= 512
+            && existsAfter(itemPath(householdId, data.itemId))
+            && getAfter(itemPath(householdId, data.itemId)).data.coverMediaId == mediaId)
+          : (nonEmpty(data.paymentId, 200) && data.dataUrlLength <= 180000 && data.width <= 1280 && data.height <= 1280
+            && existsAfter(paymentPath(householdId, data.paymentId))
+            && getAfter(paymentPath(householdId, data.paymentId)).data.itemId == data.itemId
+            && getAfter(paymentPath(householdId, data.paymentId)).data.receiptMediaId == mediaId));
+    }
+    function transactionKeysValid(data) {
+      return data.keys().hasAll([
+          'id', 'householdId', 'operationId', 'actorUid', 'kind', 'accountId', 'targetAccountId',
+          'amountMinor', 'category', 'note', 'occurredAt', 'createdAt', 'deletedAt', 'purgedAt', 'lastOperationId'
+        ])
+        && data.keys().hasOnly([
+          'id', 'householdId', 'operationId', 'actorUid', 'kind', 'accountId', 'targetAccountId',
+          'amountMinor', 'category', 'note', 'occurredAt', 'createdAt', 'deletedAt', 'purgedAt', 'lastOperationId',
+          'sourceType', 'sourceItemId', 'sourcePaymentId'
+        ]);
+    }
+    function validTransactionShape(data, householdId, transactionId) {
+      return transactionKeysValid(data)
+        && data.id == transactionId && data.householdId == householdId
+        && nonEmpty(data.operationId, 200) && nonEmpty(data.actorUid, 200)
+        && data.kind in ['income', 'expense', 'transfer']
+        && nonEmpty(data.accountId, 200)
+        && exists(accountPath(householdId, data.accountId))
+        && (data.kind == 'transfer' ? nonEmpty(data.targetAccountId, 200) : data.targetAccountId == null)
+        && safePositiveMoney(data.amountMinor)
+        && optionalString(data.category, 200) && optionalString(data.note, 2000)
+        && nonEmpty(data.occurredAt, 100) && nonEmpty(data.createdAt, 100)
+        && (data.deletedAt == null || nonEmpty(data.deletedAt, 100))
+        && (data.purgedAt == null || nonEmpty(data.purgedAt, 100))
+        && nonEmpty(data.lastOperationId, 200);
+    }
+    function isLinkedTransaction(data) { return data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId']); }
+    function validLinkedTransaction(data, householdId, transactionId) {
+      let paymentId = data.sourcePaymentId;
+      return data.keys().hasAll(['sourceType', 'sourceItemId', 'sourcePaymentId'])
+        && data.sourceType == 'itemPayment'
+        && transactionId == 'item-payment-' + paymentId
+        && data.kind == 'expense' && data.category == '购物'
+        && data.targetAccountId == null && data.purgedAt == null
+        && existsAfter(paymentPath(householdId, paymentId))
+        && getAfter(paymentPath(householdId, paymentId)).data.ledgerMode == 'linked'
+        && getAfter(paymentPath(householdId, paymentId)).data.transactionId == transactionId
+        && getAfter(paymentPath(householdId, paymentId)).data.itemId == data.sourceItemId
+        && getAfter(paymentPath(householdId, paymentId)).data.accountId == data.accountId
+        && getAfter(paymentPath(householdId, paymentId)).data.amountMinor == data.amountMinor
+        && getAfter(paymentPath(householdId, paymentId)).data.note == data.note
+        && getAfter(paymentPath(householdId, paymentId)).data.occurredAt == data.occurredAt
+        && getAfter(paymentPath(householdId, paymentId)).data.createdAt == data.createdAt
+        && getAfter(paymentPath(householdId, paymentId)).data.actorUid == data.actorUid
+        && getAfter(paymentPath(householdId, paymentId)).data.lastOperationId == data.lastOperationId
+        && getAfter(paymentPath(householdId, paymentId)).data.voidedAt == data.deletedAt;
     }
 
     match /access/{userId} {
@@ -104,14 +406,45 @@ service cloud.firestore {
         allow delete: if false;
       }
 
+      match /items/{itemId} {
+        allow read: if isMember(householdId);
+        allow create: if isMember(householdId) && validItemCreate(request.resource.data, householdId, itemId);
+        allow update: if isMember(householdId) && validItemUpdate(request.resource.data, resource.data, householdId, itemId);
+        allow delete: if false;
+      }
+
+      match /itemPayments/{paymentId} {
+        allow read: if isMember(householdId);
+        allow create: if isMember(householdId) && validPaymentCreate(request.resource.data, householdId, paymentId);
+        allow update: if isMember(householdId) && validPaymentUpdate(request.resource.data, resource.data, householdId, paymentId);
+        allow delete: if false;
+      }
+
+      match /itemMedia/{mediaId} {
+        allow read: if isMember(householdId);
+        allow create: if isMember(householdId) && validMediaShape(request.resource.data, householdId, mediaId);
+        allow update: if false;
+        allow delete: if isMember(householdId)
+          && resource.data.kind == 'cover'
+          && getAfter(itemPath(householdId, resource.data.itemId)).data.coverMediaId != mediaId;
+      }
+
       match /transactions/{transactionId} {
         allow read: if isMember(householdId);
         allow create: if isMember(householdId)
-          && request.resource.data.householdId == householdId
-          && request.resource.data.actorUid == request.auth.uid;
+          && validTransactionShape(request.resource.data, householdId, transactionId)
+          && request.resource.data.actorUid == request.auth.uid
+          && (isLinkedTransaction(request.resource.data)
+            ? validLinkedTransaction(request.resource.data, householdId, transactionId)
+            : !request.resource.data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId']));
         allow update: if isMember(householdId)
+          && validTransactionShape(request.resource.data, householdId, transactionId)
           && request.resource.data.householdId == resource.data.householdId
-          && request.resource.data.actorUid == resource.data.actorUid;
+          && request.resource.data.actorUid == resource.data.actorUid
+          && (isLinkedTransaction(resource.data)
+            ? (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'lastOperationId'])
+              && validLinkedTransaction(request.resource.data, householdId, transactionId))
+            : (!isLinkedTransaction(request.resource.data)));
         allow delete: if false;
       }
     }
