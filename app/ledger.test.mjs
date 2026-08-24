@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger, householdTotals,
-  monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile, restoreFromRecycleBin, updateAccount, updateTransaction
+  accountSubtype, applyOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger,
+  estimatedMonthlyInterestMinor, householdTotals, loanCalculationMode, monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile,
+  remainingPayoffMonths, repaymentBreakdown, restoreFromRecycleBin, suggestedRepayment, updateAccount, updateTransaction
 } from './ledger.js';
 
 const seed = () => createLedger({ accounts: [
@@ -177,4 +178,210 @@ test('普通旧账目不新增物品付款来源键', () => {
   assert.equal(Object.hasOwn(ordinary, 'sourcePaymentId'), false);
   const derived = deriveLedger({ accounts: seed().accounts, transactions: [ordinary] }).transactions[0];
   assert.equal(Object.hasOwn(derived, 'sourceType'), false);
+});
+
+const liabilitySeed = () => createLedger({ accounts: [
+  { id: 'cash', name: '现金', kind: 'asset', openingBalanceMinor: 100000, balanceMinor: 100000, includeInTotal: true },
+  { id: 'card', name: '信用卡', kind: 'liability', subtype: 'credit_card', openingBalanceMinor: 50000, balanceMinor: 50000, includeInTotal: true },
+  { id: 'loan', name: '车贷', kind: 'liability', subtype: 'loan', openingBalanceMinor: 200000, balanceMinor: 200000, includeInTotal: true }
+] });
+
+test('旧账户缺少 subtype 时按会计类型兼容，旧负债支出使用正数债务语义', () => {
+  assert.equal(accountSubtype({ kind: 'asset' }), 'asset');
+  assert.equal(accountSubtype({ kind: 'liability' }), 'generic_liability');
+  const rebuilt = deriveLedger({
+    accounts: [
+      { id: 'legacy-asset', kind: 'asset', openingBalanceMinor: 10000 },
+      { id: 'legacy-debt', kind: 'liability', openingBalanceMinor: 2000 }
+    ],
+    transactions: [
+      { id: 'asset-expense', kind: 'expense', accountId: 'legacy-asset', amountMinor: 500, occurredAt: '2026-08-01T00:00:00.000Z' },
+      { id: 'debt-expense', kind: 'expense', accountId: 'legacy-debt', amountMinor: 700, occurredAt: '2026-08-01T00:00:00.000Z' }
+    ]
+  });
+  assert.equal(rebuilt.accounts[0].balanceMinor, 9500);
+  assert.equal(rebuilt.accounts[1].balanceMinor, 2700);
+  assert.deepEqual(householdTotals(rebuilt), { assetsMinor: 9500, liabilitiesMinor: 2700, netMinor: 6800 });
+  assert.deepEqual(reconcile(rebuilt), { ok: true, mismatches: [] });
+});
+
+test('信用卡支出增加正数债务且月度支出只计算一次', () => {
+  const ledger = applyOperation(liabilitySeed(), {
+    id: 'card-groceries', kind: 'expense', accountId: 'card', amountMinor: 8800,
+    occurredAt: '2026-08-10T12:00:00.000Z'
+  }).ledger;
+  assert.equal(ledger.accounts.find(account => account.id === 'card').balanceMinor, 58800);
+  assert.deepEqual(monthlySummary(ledger, '2026-08'), { incomeMinor: 0, expenseMinor: 8800 });
+  assert.deepEqual(reconcile(ledger), { ok: true, mismatches: [] });
+});
+
+test('收入只能记入资产账户，拒绝负债收入且不污染账本', () => {
+  const ledger = liabilitySeed();
+  assert.throws(() => applyOperation(ledger, {
+    id: 'invalid-liability-income', kind: 'income', accountId: 'card', amountMinor: 1000
+  }), /收入仅支持资产账户/);
+  assert.equal(ledger.accounts.find(account => account.id === 'card').balanceMinor, 50000);
+  assert.equal(ledger.transactions.length, 0);
+});
+
+test('信用卡还款可从资产扣款或使用账外资金，并支持部分与全额还清', () => {
+  let ledger = applyOperation(liabilitySeed(), {
+    id: 'card-partial', kind: 'repayment', accountId: 'cash', targetAccountId: 'card', amountMinor: 20000
+  }).ledger;
+  assert.equal(ledger.accounts.find(account => account.id === 'cash').balanceMinor, 80000);
+  assert.equal(ledger.accounts.find(account => account.id === 'card').balanceMinor, 30000);
+  assert.deepEqual(
+    (({ principalMinor, interestMinor }) => ({ principalMinor, interestMinor }))(ledger.transactions[0]),
+    { principalMinor: 20000, interestMinor: 0 }
+  );
+
+  const retry = applyOperation(ledger, {
+    id: 'card-partial', kind: 'repayment', accountId: 'cash', targetAccountId: 'card', amountMinor: 20000
+  });
+  assert.equal(retry.duplicate, true);
+  ledger = applyOperation(retry.ledger, {
+    id: 'card-full-off-ledger', kind: 'repayment', targetAccountId: 'card', amountMinor: 30000
+  }).ledger;
+  assert.equal(ledger.accounts.find(account => account.id === 'cash').balanceMinor, 80000);
+  assert.equal(ledger.accounts.find(account => account.id === 'card').balanceMinor, 0);
+  assert.deepEqual(monthlySummary(ledger, ledger.transactions[0].occurredAt.slice(0, 7)), { incomeMinor: 0, expenseMinor: 0 });
+  assert.deepEqual(reconcile(ledger), { ok: true, mismatches: [] });
+});
+
+test('超过当前债务的还款被拒绝且不污染原账本', () => {
+  const ledger = liabilitySeed();
+  assert.throws(() => applyOperation(ledger, {
+    id: 'card-overpay', kind: 'repayment', accountId: 'cash', targetAccountId: 'card', amountMinor: 50001
+  }), /还款本金不能超过当前债务/);
+  assert.equal(ledger.accounts.find(account => account.id === 'cash').balanceMinor, 100000);
+  assert.equal(ledger.accounts.find(account => account.id === 'card').balanceMinor, 50000);
+  assert.equal(ledger.transactions.length, 0);
+  assert.equal(ledger.appliedOperationIds.has('card-overpay'), false);
+});
+
+test('贷款还款总额等于本金加利息，资产扣总额、负债只扣本金且月度只计利息', () => {
+  const ledger = applyOperation(liabilitySeed(), {
+    id: 'loan-payment', kind: 'repayment', accountId: 'cash', targetAccountId: 'loan',
+    amountMinor: 12000, principalMinor: 10000, interestMinor: 2000,
+    occurredAt: '2026-08-12T00:00:00.000Z'
+  }).ledger;
+  assert.equal(ledger.accounts.find(account => account.id === 'cash').balanceMinor, 88000);
+  assert.equal(ledger.accounts.find(account => account.id === 'loan').balanceMinor, 190000);
+  assert.deepEqual(monthlySummary(ledger, '2026-08'), { incomeMinor: 0, expenseMinor: 2000 });
+  assert.throws(() => applyOperation(liabilitySeed(), {
+    id: 'bad-loan-sum', kind: 'repayment', targetAccountId: 'loan',
+    amountMinor: 12000, principalMinor: 10000, interestMinor: 1000
+  }), /本金与利息之和/);
+  assert.deepEqual(reconcile(ledger), { ok: true, mismatches: [] });
+});
+
+test('马来西亚固定月供车贷默认使用计划金额且整笔减少剩余应付总额', () => {
+  const account = {
+    id:'car-hp', kind:'liability', subtype:'loan', loanType:'car', loanCalculationMode:'fixed_instalment',
+    balanceMinor:500000, scheduledPaymentMinor:119900
+  };
+  assert.equal(loanCalculationMode(account), 'fixed_instalment');
+  assert.deepEqual(suggestedRepayment(account), { amountMinor:119900, principalMinor:119900, interestMinor:0 });
+  assert.deepEqual(repaymentBreakdown(account, 100000), { amountMinor:100000, principalMinor:100000, interestMinor:0 });
+});
+
+test('马来西亚浮动房贷按当前本金与年利率估算利息并从月供拆出本金', () => {
+  const account = {
+    id:'home-loan', kind:'liability', subtype:'loan', loanType:'home', loanCalculationMode:'reducing_balance',
+    balanceMinor:10000000, scheduledPaymentMinor:120000, annualInterestRateBps:420
+  };
+  assert.equal(loanCalculationMode(account), 'reducing_balance');
+  assert.equal(estimatedMonthlyInterestMinor(account), 35000);
+  assert.deepEqual(suggestedRepayment(account), { amountMinor:120000, principalMinor:85000, interestMinor:35000 });
+  assert.deepEqual(repaymentBreakdown(account, 150000), { amountMinor:150000, principalMinor:115000, interestMinor:35000 });
+  assert.deepEqual(repaymentBreakdown(account, 150000, 36000), { amountMinor:150000, principalMinor:114000, interestMinor:36000 });
+  assert.throws(() => repaymentBreakdown(account, 35000), /必须高于本期利息/);
+});
+
+test('信用卡建议金额默认为一次还清当前欠款', () => {
+  const account = { id:'visa', kind:'liability', subtype:'credit_card', balanceMinor:87654 };
+  assert.deepEqual(suggestedRepayment(account), { amountMinor:87654, principalMinor:87654, interestMinor:0 });
+});
+
+test('转账严格限制为资产到账户，负债只能通过还款减少', () => {
+  const ledger = liabilitySeed();
+  assert.throws(() => applyOperation(ledger, {
+    id: 'asset-to-debt-transfer', kind: 'transfer', accountId: 'cash', targetAccountId: 'card', amountMinor: 100
+  }), /转账仅支持资产账户/);
+  assert.throws(() => applyOperation(ledger, {
+    id: 'debt-to-asset-transfer', kind: 'transfer', accountId: 'card', targetAccountId: 'cash', amountMinor: 100
+  }), /转账仅支持资产账户/);
+  assert.equal(ledger.transactions.length, 0);
+});
+
+test('还款回收、恢复、编辑会准确反向与重放，编辑越界保持原账本不变', () => {
+  let ledger = applyOperation(liabilitySeed(), {
+    id: 'editable-payment', kind: 'repayment', accountId: 'cash', targetAccountId: 'card', amountMinor: 20000
+  }).ledger;
+  ledger = moveToRecycleBin(ledger, 'editable-payment', 'void-payment').ledger;
+  assert.equal(ledger.accounts.find(account => account.id === 'cash').balanceMinor, 100000);
+  assert.equal(ledger.accounts.find(account => account.id === 'card').balanceMinor, 50000);
+  ledger = restoreFromRecycleBin(ledger, 'editable-payment', 'restore-payment').ledger;
+  assert.equal(ledger.accounts.find(account => account.id === 'cash').balanceMinor, 80000);
+  assert.equal(ledger.accounts.find(account => account.id === 'card').balanceMinor, 30000);
+
+  const edited = updateTransaction(ledger, 'editable-payment', { amountMinor: 30000 }, 'edit-payment');
+  assert.equal(edited.ledger.accounts.find(account => account.id === 'cash').balanceMinor, 70000);
+  assert.equal(edited.ledger.accounts.find(account => account.id === 'card').balanceMinor, 20000);
+  assert.deepEqual(reconcile(edited.ledger), { ok: true, mismatches: [] });
+
+  assert.throws(() => updateTransaction(edited.ledger, 'editable-payment', {
+    amountMinor: 60000, principalMinor: 60000
+  }, 'edit-overpay'), /还款本金不能超过当前债务/);
+  assert.equal(edited.ledger.accounts.find(account => account.id === 'cash').balanceMinor, 70000);
+  assert.equal(edited.ledger.accounts.find(account => account.id === 'card').balanceMinor, 20000);
+});
+
+test('创建和更新会校验信用卡及贷款元数据', () => {
+  let ledger = createAccount(seed(), {
+    id: 'new-card', name: '家庭信用卡', kind: 'liability', subtype: 'credit_card', openingBalanceMinor: 0,
+    creditLimitMinor: 300000, statementDay: 10, dueDay: 28
+  });
+  assert.equal(ledger.accounts.find(account => account.id === 'new-card').creditLimitMinor, 300000);
+  ledger = updateAccount(ledger, 'new-card', { dueDay: 25 });
+  assert.equal(ledger.accounts.find(account => account.id === 'new-card').dueDay, 25);
+  assert.throws(() => createAccount(seed(), {
+    id: 'bad-day', name: '错误卡', kind: 'liability', subtype: 'credit_card', openingBalanceMinor: 0, dueDay: 32
+  }), /日期必须介于 1 至 31/);
+  assert.throws(() => createAccount(seed(), {
+    id: 'bad-loan', name: '错误贷款', kind: 'liability', subtype: 'loan', openingBalanceMinor: 0,
+    loanType: 'holiday', expectedPayoffDate: '2026-02-30'
+  }), /贷款类型无效|预计还清日期无效/);
+  const loanLedger = createAccount(seed(), {
+    id: 'new-loan', name: '房贷', kind: 'liability', subtype: 'loan', openingBalanceMinor: 25000000,
+    loanType: 'home', loanCalculationMode:'reducing_balance', annualInterestRateBps:420,
+    originalPrincipalMinor: 30000000, scheduledPaymentMinor: 150000,
+    expectedPayoffDate: '2040-08-24'
+  });
+  assert.equal(loanLedger.accounts.find(account => account.id === 'new-loan').loanType, 'home');
+});
+
+test('显式 asset→credit_card 转换仅允许零余额且无历史的账户，并保留账户 ID', () => {
+  const emptyAsset = createAccount(seed(), { id: 'convert-me', name: '待转换账户', kind: 'asset', openingBalanceMinor: 0 });
+  const converted = updateAccount(emptyAsset, 'convert-me', {
+    subtype: 'credit_card', creditLimitMinor: 100000, statementDay: 5, dueDay: 20
+  });
+  const account = converted.accounts.find(candidate => candidate.id === 'convert-me');
+  assert.equal(account.id, 'convert-me');
+  assert.equal(account.kind, 'liability');
+  assert.equal(account.subtype, 'credit_card');
+
+  assert.throws(() => updateAccount(seed(), 'mbb', { subtype: 'loan', loanType: 'other' }), /零余额且无账目历史/);
+  let historical = createAccount(seed(), { id: 'zero-history', name: '有历史', kind: 'asset', openingBalanceMinor: 0 });
+  historical = applyOperation(historical, { id: 'in', kind: 'income', accountId: 'zero-history', amountMinor: 100 }).ledger;
+  historical = applyOperation(historical, { id: 'out', kind: 'expense', accountId: 'zero-history', amountMinor: 100 }).ledger;
+  assert.throws(() => updateAccount(historical, 'zero-history', { subtype: 'credit_card' }), /零余额且无账目历史/);
+});
+
+test('预计还清月数使用纯日期计算，不受时区解析影响', () => {
+  const loan = { kind: 'liability', subtype: 'loan', expectedPayoffDate: '2027-08-24' };
+  assert.equal(remainingPayoffMonths(loan, '2026-08-24'), 12);
+  assert.equal(remainingPayoffMonths(loan, '2026-08-25'), 12);
+  assert.equal(remainingPayoffMonths({ kind: 'liability', subtype: 'loan' }, '2026-08-24'), null);
+  assert.equal(remainingPayoffMonths({ ...loan, expectedPayoffDate: '2026-08-23' }, '2026-08-24'), 0);
 });

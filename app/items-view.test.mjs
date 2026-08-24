@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createLedger } from './ledger.js';
 import { createItemsState, createItem, recordItemPayment } from './items.js';
 import {
-  LOCAL_SCHEMA_VERSION, displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch,
+  LOCAL_SCHEMA_VERSION, describeEtaDate, displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch,
   normaliseDisplayItem, rawSnapshotHasOperation, renderItemCards, serialiseLocalEnvelope,
   withoutMediaDataUrls
 } from './items-view.js';
@@ -68,6 +68,36 @@ test('橱窗卡片保持两端安全转义并只渲染独立媒体缓存', () =>
   });
   assert.match(withMedia, /loading="lazy"/);
   assert.match(withMedia, /data:image\/jpeg;base64/);
+});
+
+test('到货日期说明只比较 YYYY-MM-DD 字段，不依赖时区解析', () => {
+  assert.equal(describeEtaDate('2026-09-12', '2026-09-10'), '预计 9月12日到货');
+  assert.equal(describeEtaDate('2026-09-12', '2026-09-12'), '预计今天到货');
+  assert.equal(describeEtaDate('2026-09-12', '2026-09-13'), '原预计 9月12日');
+  assert.equal(describeEtaDate(null, '2026-09-13'), '');
+});
+
+test('物品卡片以不同文字标示三种状态，待付含余额，ETA 保持低层级且输出安全转义', () => {
+  const html = renderItemCards([
+    { id:'active', name:'<书桌>', fullPriceMinor:10000, paidMinor:2000, etaDate:'2026-09-12' },
+    { id:'completed', name:'相机', fullPriceMinor:5000, paidMinor:5000 },
+    { id:'archived', name:'旧手机', fullPriceMinor:3000, paidMinor:3000, archivedAt:'2026-09-01T00:00:00.000Z' }
+  ], {
+    formatMoney:value => `RM ${(value / 100).toFixed(2)}`,
+    todayDate:'2026-09-10'
+  });
+  assert.match(html, /<small class="item-eta">预计 9月12日到货<\/small>/);
+  assert.match(html, /data-item-status="active">待付 RM 80\.00<\/em>/);
+  assert.match(html, /data-item-status="completed">已付清<\/em>/);
+  assert.match(html, /data-item-status="archived">已归档<\/em>/);
+  assert.doesNotMatch(html, />余额 RM/);
+  assert.doesNotMatch(html, /<书桌>/);
+
+  const escapedMoney = renderItemCards([
+    { id:'safe', name:'安全', fullPriceMinor:100, paidMinor:0 }
+  ], { formatMoney:() => 'RM <script>alert(1)</script>', todayDate:'2026-09-10' });
+  assert.doesNotMatch(escapedMoney, /<script>/);
+  assert.match(escapedMoney, /待付 RM &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 });
 
 test('备份递归移除照片 Data URL 与图片字段但保留业务元数据', () => {

@@ -24,6 +24,22 @@ const normalisePaymentId = input => input.paymentId ?? input.id;
 const normaliseFullPrice = input => input.fullPriceMinor ?? input.fullPriceSen;
 const normaliseAmount = input => input.amountMinor ?? input.amountSen;
 
+export function normaliseEtaDate(value) {
+  if (value == null || (typeof value === 'string' && !value.trim())) return null;
+  if (typeof value !== 'string') throw new Error('到货日期必须是有效的 YYYY-MM-DD');
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) throw new Error('到货日期必须是有效的 YYYY-MM-DD');
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year === 0 || month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]) {
+    throw new Error('到货日期必须是有效的 YYYY-MM-DD');
+  }
+  return value;
+}
+
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
   if (value && typeof value === 'object') {
@@ -105,6 +121,7 @@ function normaliseItem(raw, index) {
   item.fullPriceMinor = positiveMoney(normaliseFullPrice(item), '物品全价');
   item.createdAt = item.createdAt ?? new Date(index).toISOString();
   item.status = ITEM_STATUSES.has(item.status) ? item.status : (item.archivedAt ? 'archived' : 'active');
+  item.etaDate = normaliseEtaDate(item.etaDate);
   item.archivedAt = item.archivedAt ?? (item.status === 'archived' ? item.updatedAt ?? item.createdAt : null);
   item.createdBy = item.createdBy ?? item.actor ?? null;
   item.updatedAt = item.updatedAt ?? item.createdAt;
@@ -202,10 +219,11 @@ export function createItem(state, input, options = {}) {
   const operationId = nonEmptyId(merged.operationId ?? `item-create-${itemId}`, 'operationId');
   const fullPriceMinor = positiveMoney(normaliseFullPrice(input), '物品全价');
   const name = String(input?.name ?? '').trim();
+  const etaDate = normaliseEtaDate(input?.etaDate);
   if (!name) throw new Error('物品名称必填');
   const reserved = new Set([
     'deposit', 'depositMinor', 'depositPaymentId', 'depositOperationId', 'depositMode', 'depositAccountId',
-    'operationId', 'expectedRevision', 'fullPriceSen', 'status', 'archivedAt', 'lifecycle'
+    'operationId', 'expectedRevision', 'fullPriceSen', 'etaDate', 'status', 'archivedAt', 'lifecycle'
   ]);
   const metadata = Object.fromEntries(Object.entries(input).filter(([key]) => !reserved.has(key)));
   const signatureMetadata = Object.fromEntries(
@@ -231,7 +249,8 @@ export function createItem(state, input, options = {}) {
     receiptMediaId: deposit.receiptMediaId ?? null
   } : null;
   const signature = fingerprint({
-    kind: 'createItem', itemId, name, fullPriceMinor, metadata: signatureMetadata, deposit: signatureDeposit
+    kind: 'createItem', itemId, name, fullPriceMinor, ...(etaDate ? { etaDate } : {}),
+    metadata: signatureMetadata, deposit: signatureDeposit
   });
   if (checkDuplicate(current, operationId, signature)) {
     const existing = itemById(current, itemId);
@@ -248,6 +267,7 @@ export function createItem(state, input, options = {}) {
     id: itemId,
     name,
     fullPriceMinor,
+    etaDate,
     status: 'active',
     createdAt,
     createdBy: merged.createdBy ?? actor,
@@ -495,8 +515,9 @@ export function editItem(state, itemId, changes = {}, operation = {}) {
   const current = asItemsState(state);
   const input = { ...changes, ...operationInput(operation) };
   const operationId = nonEmptyId(input.operationId, 'operationId');
-  const allowedMetadata = ['name', 'description', 'imageUrl', 'coverMediaId', 'category', 'targetDate', 'note', 'metadata'];
+  const allowedMetadata = ['name', 'description', 'imageUrl', 'coverMediaId', 'category', 'targetDate', 'etaDate', 'note', 'metadata'];
   const changedMetadata = Object.fromEntries(allowedMetadata.filter(key => changes[key] !== undefined).map(key => [key, changes[key]]));
+  if (changes.etaDate !== undefined) changedMetadata.etaDate = normaliseEtaDate(changes.etaDate);
   const requestedPrice = normaliseFullPrice(changes);
   const signature = fingerprint({ kind: 'editItem', itemId, metadata: changedMetadata, fullPriceMinor: requestedPrice });
   if (checkDuplicate(current, operationId, signature)) return duplicateResult(current, { item: requireItem(current, itemId) });
