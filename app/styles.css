@@ -352,16 +352,19 @@ h2 { font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; }
 .account-row.loan .account-mark,
 .account-row[data-account-subtype="loan"] .account-mark { background: var(--warning-soft); color: var(--warning); }
 
-.account-detail-hero { display: grid; grid-template-columns: 66px minmax(0, 1fr) auto; align-items: center; gap: 18px; margin-bottom: 20px; padding: 20px; border-radius: var(--radius-card); background: var(--surface-soft); }
+.account-detail-hero { display: grid; grid-template-areas: "avatar copy action" "balance balance balance"; grid-template-columns: 66px minmax(0, 1fr) auto; align-items: center; column-gap: 18px; row-gap: 14px; margin-bottom: 20px; padding: 20px; border-radius: var(--radius-card); background: var(--surface-soft); }
 .account-detail-sheet .sheet-head { margin-bottom: 22px; }
 .account-detail-avatar, .account-photo-preview { display: grid; place-items: center; overflow: hidden; flex: 0 0 auto; border-radius: 16px; background: var(--accent-soft); color: var(--accent-strong); }
-.account-detail-avatar { width: 66px; height: 66px; }
+.account-detail-avatar { grid-area: avatar; width: 66px; height: 66px; }
 .account-photo-preview { width: 76px; height: 76px; }
 .account-detail-avatar svg, .account-photo-preview svg { width: 28px; height: 28px; }
 .account-detail-avatar img, .account-photo-preview img { width: 100%; height: 100%; object-fit: cover; }
-.account-detail-copy { min-width: 0; }
-.account-detail-copy span { color: var(--muted); font-size: 11px; font-weight: 700; }
-.account-detail-copy strong { display: block; margin-top: 5px; overflow: hidden; font-size: 24px; letter-spacing: -0.03em; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.account-detail-copy { grid-area: copy; min-width: 0; }
+.account-detail-copy span { color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1.45; }
+.account-detail-balance { grid-area: balance; display: block; min-width: 0; width: 100%; overflow: visible; color: var(--ink); font-size: clamp(26px, 8vw, 38px); line-height: 1.05; letter-spacing: -0.04em; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.account-detail-balance[data-amount-size="compact"] { font-size: clamp(23px, 6.8vw, 32px); }
+.account-detail-balance[data-amount-size="dense"] { font-size: clamp(15px, 4.5vw, 24px); }
+#editAccountFromDetailButton { grid-area: action; }
 .account-detail-heading { margin: 28px 0 12px; }
 .account-detail-heading h3 { font-size: 16px; }
 .account-detail-heading p { margin-top: 4px; color: var(--muted); font-size: 11px; }
@@ -711,6 +714,12 @@ body.is-switching [data-mutation] { pointer-events: none; opacity: .45; }
   .transaction-row, .account-row { min-height: 72px; padding-inline: 18px; }
   .transaction-row + .transaction-row::before, .account-row + .account-row::before { right: 18px; }
   .items-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+}
+
+@media (max-width: 520px) {
+  .account-detail-hero { grid-template-areas: "avatar copy" "balance balance" "action action"; grid-template-columns: 56px minmax(0, 1fr); column-gap: 14px; row-gap: 14px; }
+  .account-detail-avatar { width: 56px; height: 56px; }
+  #editAccountFromDetailButton { width: 100%; }
 }
 
 @media (max-width: 420px) {

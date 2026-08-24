@@ -992,6 +992,13 @@ function renderAccountGroups(accounts) {
   return `<div class="account-groups">${groups.filter(([, rows]) => rows.length).map(([title, rows]) => `<section class="account-group"><div class="account-group-heading"><h3>${title}</h3><span>${rows.length} 个账户</span></div><div class="account-group-list">${rows.map(accountRowMarkup).join('')}</div></section>`).join('')}</div>`;
 }
 
+function accountDetailAmountSize(amountMinor) {
+  const minorDigits = String(Math.trunc(Math.abs(amountMinor))).length;
+  if (minorDigits >= 14) return 'dense';
+  if (minorDigits >= 10) return 'compact';
+  return 'standard';
+}
+
 function renderAccountDetail() {
   const account = accountById(selectedAccountDetailId);
   if (!account) return;
@@ -1008,7 +1015,9 @@ function renderAccountDetail() {
   const subtype = accountSubtype(account);
   const detailType = subtype === 'loan' ? `${loanTypeLabel(account)} · ${loanModeLabel(account)}` : accountSubtypeLabel(account);
   $('#accountDetailKind').textContent = `${detailType} · ${accountBalanceMeaning(account)}`;
-  $('#accountDetailBalance').textContent = formatRM(account.balanceMinor);
+  const detailBalance = $('#accountDetailBalance');
+  detailBalance.textContent = formatRM(account.balanceMinor);
+  detailBalance.dataset.amountSize = accountDetailAmountSize(account.balanceMinor);
   $('#accountDetailAvatar').innerHTML = accountAvatarMarkup(account);
   $('#accountDetailMonthLabel').textContent = `${monthLabel(selectedMonth)}账目`;
   $('#accountDetailCount').textContent = `${entries.length} 笔记录`;

@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-12/);
+  assert.match(worker, /family-wallet-v2-cloud-13/);
 });
 
 test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {
@@ -327,6 +327,22 @@ test('还款使用单一 ledger operation 与正常 transaction 同步路径', a
   assert.match(main, /else if \(dialog\?\.id === 'repaymentDialog'\) closeRepayment\(\{ returnToDetail:true \}\)/);
   assert.match(main, /openRepaymentButton'\)\.addEventListener\('click', \(\) => openRepaymentFromDetail\(selectedAccountDetailId\)\)/);
   assert.doesNotMatch(main, /openRepaymentButton'\)\.addEventListener\('click', \(\) => openRepayment\(selectedAccountDetailId\)\)/);
+});
+
+test('所有账户类型的大额明细金额独占整行并按长度缩放，不使用省略号', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  assert.match(html, /class="account-detail-balance" id="accountDetailBalance" data-amount-size="standard"/);
+  assert.match(main, /function accountDetailAmountSize\(amountMinor\)/);
+  assert.match(main, /detailBalance\.dataset\.amountSize = accountDetailAmountSize\(account\.balanceMinor\)/);
+  assert.match(styles, /grid-template-areas:\s*"avatar copy action"\s*"balance balance balance"/);
+  assert.match(styles, /\.account-detail-balance\s*\{[^}]*grid-area:\s*balance[^}]*overflow:\s*visible[^}]*white-space:\s*nowrap/s);
+  assert.match(styles, /\.account-detail-balance\[data-amount-size="compact"\]/);
+  assert.match(styles, /\.account-detail-balance\[data-amount-size="dense"\]/);
+  assert.match(styles, /@media \(max-width: 520px\)\s*\{[^}]*grid-template-areas:\s*"avatar copy"\s*"balance balance"\s*"action action"/s);
+  const balanceRule = styles.match(/\.account-detail-balance\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.doesNotMatch(balanceRule, /text-overflow|overflow:\s*hidden/);
 });
 
 test('用户反馈界面：账户可辨识、排除总额不冻结、贷款留白与皮肤设置完整', async () => {
