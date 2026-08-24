@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f3f7f6">
   <meta name="description" content="可由家人共同使用的私人家庭账本">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('family-wallet-v2-theme')||'teal'}catch{document.documentElement.dataset.theme='teal'}</script>
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="stylesheet" href="./styles.css">
   <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
@@ -286,8 +287,10 @@
       </div>
       <div class="subtype-fields" id="loanFields" hidden>
         <label class="field"><span>贷款类型</span><select id="loanType"><option value="car">车贷</option><option value="home">房贷</option><option value="other">其他贷款</option></select></label>
-        <label class="field"><span>原始本金（RM，可选）</span><input id="originalPrincipal" inputmode="decimal" placeholder="0.00"></label>
-        <label class="field"><span>每期计划还款（RM，可选）</span><input id="scheduledPayment" inputmode="decimal" placeholder="0.00"></label>
+        <label class="field"><span>还款计算方式</span><select id="loanCalculationMode"><option value="fixed_instalment">固定月供（传统车贷）</option><option value="reducing_balance">递减余额（房贷／新制车贷）</option><option value="manual">手动金额</option></select><small id="loanCalculationHelp">固定月供已包含利息，每期整笔减少剩余应付总额。</small></label>
+        <label class="field" id="annualInterestRateRow" hidden><span>目前年利率（%）</span><input id="annualInterestRate" inputmode="decimal" placeholder="例如：4.20"><small>用于估算本月利息；银行实际日息可能有少许差异。</small></label>
+        <label class="field"><span id="originalPrincipalLabel">原始融资额（RM，可选）</span><input id="originalPrincipal" inputmode="decimal" placeholder="0.00"></label>
+        <label class="field"><span id="scheduledPaymentLabel">每月固定还款（RM，可选）</span><input id="scheduledPayment" inputmode="decimal" placeholder="例如：1199.00"><small id="scheduledPaymentHelp">记录还款时会自动填入这个金额，仍可修改。</small></label>
         <label class="field"><span>预计还清日期（可选）</span><input id="expectedPayoffDate" type="date"></label>
       </div>
       <label class="field" id="openingBalanceRow"><span id="openingBalanceLabel">当前余额（RM）</span><input id="openingBalance" inputmode="decimal" value="0.00" required></label>
@@ -306,10 +309,16 @@
         <div><p class="sheet-context">负债还款</p><h2 id="repaymentAccountName">账户</h2></div>
         <button class="icon-button" type="button" data-close-dialog="repaymentDialog" aria-label="关闭">×</button>
       </div>
-      <p class="sheet-description" id="repaymentBalanceCopy">从可用资金还款会同时减少现金和负债，不会再记一笔支出；账外资金只减少负债。</p>
-      <button class="secondary-button repayment-full-button" id="repaymentFullButton" type="button">填入全部待还金额</button>
-      <label class="field"><span>偿还本金（RM）</span><input id="repaymentPrincipal" inputmode="decimal" required placeholder="0.00"></label>
-      <label class="field" id="repaymentInterestRow" hidden><span>利息与费用（RM，可选）</span><input id="repaymentInterest" inputmode="decimal" placeholder="0.00"><small>贷款利息与费用计入支出，本金不计入支出。</small></label>
+      <p class="sheet-description" id="repaymentBalanceCopy">从可用资金还款会同时减少现金和负债，不会重复记一笔支出。</p>
+      <div class="repayment-amount-panel">
+        <label class="field amount-field"><span id="repaymentAmountLabel">本次还款总额</span><div class="amount-input"><b>RM</b><input id="repaymentAmount" inputmode="decimal" placeholder="0.00"></div></label>
+        <button class="text-button repayment-full-button" id="repaymentFullButton" type="button">改为一次还清</button>
+      </div>
+      <label class="field" id="repaymentInterestRow" hidden><span>本期利息估算（RM）</span><input id="repaymentInterest" inputmode="decimal" placeholder="0.00"><small>根据目前欠款和年利率估算；可按银行实际金额调整。</small></label>
+      <div class="repayment-breakdown" id="repaymentBreakdown" hidden>
+        <span>减少本金／欠款<b id="repaymentPrincipalPreview">RM 0.00</b></span>
+        <span id="repaymentInterestPreviewRow">本期利息<b id="repaymentInterestPreview">RM 0.00</b></span>
+      </div>
       <fieldset class="segmented repayment-funding-control">
         <legend>还款资金来源</legend>
         <label><input type="radio" name="repaymentFunding" value="asset" checked><span>可用资金账户</span></label>
@@ -367,7 +376,14 @@
         <div><p class="sheet-context">Family Wallet</p><h2>设置与数据</h2></div>
         <button class="icon-button" type="button" data-close-dialog="settingsDialog" aria-label="关闭">×</button>
       </div>
-      <p class="sheet-description">导出当前账本和物品付款元数据。照片内容不会进入备份。</p>
+      <fieldset class="theme-picker">
+        <legend>应用配色</legend>
+        <label><input type="radio" name="appTheme" value="teal"><span><i class="theme-swatch teal" aria-hidden="true"></i><b>清透青</b><small>目前配色</small></span></label>
+        <label><input type="radio" name="appTheme" value="maybank"><span><i class="theme-swatch maybank" aria-hidden="true"></i><b>Maybank 黄</b><small>明亮高对比</small></span></label>
+        <label><input type="radio" name="appTheme" value="cimb"><span><i class="theme-swatch cimb" aria-hidden="true"></i><b>CIMB 红</b><small>稳重醒目</small></span></label>
+        <label><input type="radio" name="appTheme" value="ocean"><span><i class="theme-swatch ocean" aria-hidden="true"></i><b>深海蓝</b><small>经典金融</small></span></label>
+      </fieldset>
+      <p class="sheet-description settings-data-description">导出当前账本和物品付款元数据。照片内容不会进入备份。</p>
       <div class="settings-actions">
         <button class="secondary-button" id="exportButton" type="button">导出资料</button>
         <button class="danger-button" id="signOutButton" type="button">登出</button>

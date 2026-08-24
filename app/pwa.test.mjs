@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-11/);
+  assert.match(worker, /family-wallet-v2-cloud-12/);
 });
 
 test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {
@@ -309,15 +309,56 @@ test('账户子类型驱动选择范围、分组、详情指标与保存元数�
 
 test('还款使用单一 ledger operation 与正常 transaction 同步路径', async () => {
   const main = await readFile(app('./main.js'), 'utf8');
-  assert.match(main, /function openRepayment\(accountId, transactionId = null\)/);
+  assert.match(main, /function openRepayment\(accountId, transactionId = null, returnAccountId = null\)/);
   assert.match(main, /kind:'repayment'/);
-  assert.match(main, /amountMinor:principalMinor \+ interestMinor/);
+  assert.match(main, /const breakdown = currentRepaymentBreakdown\(account\)/);
+  assert.match(main, /amountMinor:breakdown\.amountMinor/);
+  assert.match(main, /principalMinor:breakdown\.principalMinor/);
+  assert.match(main, /interestMinor:breakdown\.interestMinor/);
   assert.match(main, /applyLedgerOperation\(ledger, \{ id:pendingRepayment\.operationId, \.\.\.changes \}\)/);
   assert.match(main, /saveTransactionRecord\(next, transactionId\)/);
   assert.match(main, /moveToRecycleBin\(ledger, pendingRepayment\.transactionId/);
   assert.match(main, /既有还款不能直接覆写，请移入回收站后重新记录/);
   assert.match(main, /saveRepaymentButton'\)\.hidden = reviewing/);
   assert.match(main, /form\.querySelectorAll\('input, select'\).*control\.disabled = true/s);
+  assert.match(main, /function openRepaymentFromDetail\(accountId, transactionId = null\)/);
+  assert.match(main, /dismissDialog\(\$\('#accountDetailDialog'\), \(\) => openRepayment\(accountId, transactionId, accountId\)\)/);
+  assert.match(main, /function closeRepayment\(\{ returnToDetail = false \} = \{\}\)/);
+  assert.match(main, /else if \(dialog\?\.id === 'repaymentDialog'\) closeRepayment\(\{ returnToDetail:true \}\)/);
+  assert.match(main, /openRepaymentButton'\)\.addEventListener\('click', \(\) => openRepaymentFromDetail\(selectedAccountDetailId\)\)/);
+  assert.doesNotMatch(main, /openRepaymentButton'\)\.addEventListener\('click', \(\) => openRepayment\(selectedAccountDetailId\)\)/);
+});
+
+test('用户反馈界面：账户可辨识、排除总额不冻结、贷款留白与皮肤设置完整', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  assert.match(main, /\$\{escapeHtml\(account\.name\)\} ｜ \$\{escapeHtml\(type\)\} ｜ \$\{escapeHtml\(balance\)\}/);
+  assert.match(main, /account\.kind === 'liability' \? `欠款/);
+  assert.match(main, /class="account-total-status excluded">不计入总额/);
+  assert.match(styles, /\.account-row\.excluded\s*\{\s*opacity:\s*1/);
+  assert.match(main, /class="account-detail-metric"/);
+  assert.match(styles, /\.account-detail-metrics\s*\{[^}]*gap:\s*10px[^}]*margin:\s*0 0 24px/s);
+  for (const theme of ['teal', 'maybank', 'cimb', 'ocean']) {
+    assert.match(html, new RegExp(`name="appTheme" value="${theme}"`));
+  }
+  assert.match(main, /const THEME_STORE = 'family-wallet-v2-theme'/);
+  assert.match(main, /localStorage\.setItem\(THEME_STORE, selected\)/);
+  assert.match(styles, /:root\[data-theme="maybank"\]/);
+  assert.match(styles, /:root\[data-theme="cimb"\]/);
+  assert.match(styles, /:root\[data-theme="ocean"\]/);
+});
+
+test('马来西亚还款表单使用总额输入并自动采用信用卡全额或贷款计划月供', async () => {
+  const [html, main] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8')]);
+  assert.match(html, /id="repaymentAmount"/);
+  assert.doesNotMatch(html, /id="repaymentPrincipal"/);
+  assert.match(main, /const suggestion = suggestedRepayment\(account\)/);
+  assert.match(main, /默认一次还清/);
+  assert.match(main, /默认月供/);
+  assert.match(main, /estimatedMonthlyInterestMinor\(account\)/);
+  assert.match(main, /loanCalculationMode:subtype === 'loan'/);
+  assert.match(main, /annualInterestRateBps:subtype === 'loan'/);
 });
 
 test('概览圆环统计真实消费并呈现近期负债与 ETA 事项', async () => {

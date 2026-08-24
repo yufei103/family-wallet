@@ -1,7 +1,7 @@
 import {
-  accountSubtype, applyOperation as applyLedgerOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger, formatRM, householdTotals,
-  monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile, restoreFromRecycleBin,
-  remainingPayoffMonths, serialiseLedger, updateAccount, updateTransaction
+  accountSubtype, applyOperation as applyLedgerOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger, estimatedMonthlyInterestMinor, formatRM, householdTotals,
+  loanCalculationMode, monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile, repaymentBreakdown, restoreFromRecycleBin,
+  remainingPayoffMonths, serialiseLedger, suggestedRepayment, updateAccount, updateTransaction
 } from './ledger.js';
 import {
   archiveItem as archiveLocalItem, createItem as createLocalItem, createItemsState, editItem as editLocalItem,
@@ -17,6 +17,8 @@ import {
 
 const STORE = 'family-wallet-v2-local-demo';
 const ENTRY_PREFS_STORE = 'family-wallet-v2-entry-preferences';
+const THEME_STORE = 'family-wallet-v2-theme';
+const THEMES = new Set(['teal', 'maybank', 'cimb', 'ocean']);
 const ENTRY_CATEGORIES = ['薪水', '购物', '医疗', '房贷', '电费', '税费', '打油', '汽车'];
 const accountDetailPageSize = () => innerWidth < 600 ? 6 : 10;
 const $ = selector => document.querySelector(selector);
@@ -74,6 +76,7 @@ let pendingItemCreate = null;
 let pendingPayment = null;
 let pendingItemEdit = null;
 let pendingRepayment = null;
+let repaymentReturnAccountId = null;
 let requestedPaymentId = null;
 const mediaLoads = new Map();
 const itemActionOperations = new Map();
@@ -111,6 +114,15 @@ function hydrateEntryPreferences() {
   } catch {
     return fallback;
   }
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  const selected = THEMES.has(theme) ? theme : 'teal';
+  document.documentElement.dataset.theme = selected;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#f3f7f6');
+  document.querySelectorAll('input[name="appTheme"]').forEach(input => { input.checked = input.value === selected; });
+  if (persist) localStorage.setItem(THEME_STORE, selected);
+  return selected;
 }
 
 function persist() {
@@ -944,11 +956,31 @@ function renderUpcomingActions() {
   }));
 }
 
+function loanTypeLabel(account) {
+  return account.loanType === 'home' ? '房贷' : account.loanType === 'car' ? '车贷' : '其他贷款';
+}
+
+function loanModeLabel(account) {
+  const mode = loanCalculationMode(account);
+  return mode === 'fixed_instalment' ? '固定月供' : mode === 'reducing_balance' ? '递减余额' : '手动金额';
+}
+
+function accountBalanceMeaning(account) {
+  const subtype = accountSubtype(account);
+  if (subtype === 'credit_card') return '当前欠款';
+  if (subtype === 'loan') return loanCalculationMode(account) === 'fixed_instalment' ? '剩余应付总额' : '剩余本金';
+  return account.kind === 'liability' ? '当前欠款' : '当前余额';
+}
+
 function accountRowMarkup(account) {
   const subtype = accountSubtype(account);
   const debt = account.kind === 'liability';
   const subtypeClass = subtype.replace('_', '-');
-  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${accountSubtypeLabel(account)} · ${account.includeInTotal ? '计入家庭净额' : '不计入总额'}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${debt ? (subtype === 'loan' ? '剩余本金' : '当前欠款') : '当前余额'}</small></span><span class="row-chevron">${chevronIcon}</span></button>`;
+  const totalStatus = account.includeInTotal
+    ? '<span class="account-total-status">计入家庭净额</span>'
+    : '<span class="account-total-status excluded">不计入总额</span>';
+  const type = subtype === 'loan' ? loanTypeLabel(account) : accountSubtypeLabel(account);
+  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${escapeHtml(type)} ${totalStatus}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="row-chevron">${chevronIcon}</span></button>`;
 }
 
 function renderAccountGroups(accounts) {
@@ -974,7 +1006,8 @@ function renderAccountDetail() {
   const visibleEntries = entries.slice(pageStart, pageStart + pageSize);
   $('#accountDetailName').textContent = account.name;
   const subtype = accountSubtype(account);
-  $('#accountDetailKind').textContent = accountSubtypeLabel(account);
+  const detailType = subtype === 'loan' ? `${loanTypeLabel(account)} · ${loanModeLabel(account)}` : accountSubtypeLabel(account);
+  $('#accountDetailKind').textContent = `${detailType} · ${accountBalanceMeaning(account)}`;
   $('#accountDetailBalance').textContent = formatRM(account.balanceMinor);
   $('#accountDetailAvatar').innerHTML = accountAvatarMarkup(account);
   $('#accountDetailMonthLabel').textContent = `${monthLabel(selectedMonth)}账目`;
@@ -982,17 +1015,18 @@ function renderAccountDetail() {
   const metrics = $('#accountDetailMetrics');
   const metricRows = [];
   if (subtype === 'credit_card') {
-    metricRows.push(['当前欠款', formatRM(account.balanceMinor)]);
     if (account.creditLimitMinor) metricRows.push(['信用额度', formatRM(account.creditLimitMinor)], ['可用额度', formatRM(Math.max(0, account.creditLimitMinor - account.balanceMinor))]);
     if (account.statementDay) metricRows.push(['账单日', `每月 ${account.statementDay} 日`]);
     if (account.dueDay) metricRows.push(['还款日', `每月 ${account.dueDay} 日`]);
   } else if (subtype === 'loan') {
-    metricRows.push(['剩余本金', formatRM(account.balanceMinor)]);
-    if (account.originalPrincipalMinor) metricRows.push(['原始本金', formatRM(account.originalPrincipalMinor)], ['已偿还进度', `${Math.round(Math.max(0, Math.min(1, 1 - account.balanceMinor / account.originalPrincipalMinor)) * 100)}%`]);
-    if (account.scheduledPaymentMinor) metricRows.push(['每期计划', formatRM(account.scheduledPaymentMinor)]);
-    if (account.expectedPayoffDate) metricRows.push(['预计还清', `${account.expectedPayoffDate} · 剩余 ${remainingPayoffMonths(account)} 个月`]);
+    if (account.scheduledPaymentMinor) metricRows.push(['每月还款', formatRM(account.scheduledPaymentMinor)]);
+    if (loanCalculationMode(account) === 'reducing_balance' && account.annualInterestRateBps) {
+      metricRows.push(['目前年利率', `${(account.annualInterestRateBps / 100).toFixed(2)}%`], ['本月利息估算', formatRM(estimatedMonthlyInterestMinor(account))]);
+    } else metricRows.push(['计算方式', loanModeLabel(account)]);
+    if (account.originalPrincipalMinor) metricRows.push(['原始融资额', formatRM(account.originalPrincipalMinor)], ['已偿还进度', `${Math.round(Math.max(0, Math.min(1, 1 - account.balanceMinor / account.originalPrincipalMinor)) * 100)}%`]);
+    if (account.expectedPayoffDate) metricRows.push(['预计还清', `${account.expectedPayoffDate}（剩余 ${remainingPayoffMonths(account)} 个月）`]);
   }
-  metrics.innerHTML = metricRows.map(([label, value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
+  metrics.innerHTML = metricRows.map(([label, value]) => `<div class="account-detail-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
   metrics.hidden = !metricRows.length;
   $('#openRepaymentButton').hidden = account.kind !== 'liability';
   $('#accountDetailTransactionList').innerHTML = renderTransactionRows(visibleEntries, '这个月没有相关账目', '此账户在所选月份没有收入、支出或转账。', account.id);
@@ -1019,7 +1053,32 @@ function updateRepaymentFunding() {
   $('#repaymentSourceAccount').required = assetFunding;
 }
 
-function openRepayment(accountId, transactionId = null) {
+function currentRepaymentBreakdown(account) {
+  const suggested = suggestedRepayment(account);
+  const amountText = $('#repaymentAmount').value.trim();
+  const amountMinor = amountText ? amountToSen(amountText) : suggested.amountMinor;
+  const interestText = $('#repaymentInterest').value.trim();
+  const interestOverrideMinor = interestText ? amountToSen(interestText, true) : undefined;
+  return repaymentBreakdown(account, amountMinor, interestOverrideMinor);
+}
+
+function renderRepaymentBreakdown() {
+  const account = accountById(pendingRepayment?.accountId);
+  if (!account || pendingRepayment?.transactionId) return;
+  try {
+    const breakdown = currentRepaymentBreakdown(account);
+    $('#repaymentPrincipalPreview').textContent = formatRM(breakdown.principalMinor);
+    $('#repaymentInterestPreview').textContent = formatRM(breakdown.interestMinor);
+    $('#repaymentInterestPreviewRow').hidden = breakdown.interestMinor === 0 && loanCalculationMode(account) !== 'reducing_balance';
+    $('#repaymentBreakdown').hidden = false;
+    $('#repaymentMessage').textContent = '';
+  } catch (error) {
+    $('#repaymentBreakdown').hidden = true;
+    $('#repaymentMessage').textContent = error.message;
+  }
+}
+
+function openRepayment(accountId, transactionId = null, returnAccountId = null) {
   const account = accountById(accountId);
   const entry = transactionId ? ledger.transactions.find(candidate => candidate.id === transactionId && !candidate.deletedAt) : null;
   if (!account || account.kind !== 'liability') return;
@@ -1028,19 +1087,32 @@ function openRepayment(accountId, transactionId = null) {
     return;
   }
   const reviewing = Boolean(entry);
+  repaymentReturnAccountId = typeof returnAccountId === 'string' ? returnAccountId : null;
+  const subtype = accountSubtype(account);
+  const mode = subtype === 'loan' ? loanCalculationMode(account) : null;
+  const suggestion = suggestedRepayment(account);
   pendingRepayment = { accountId, transactionId:entry?.id ?? null, operationId:uid('repayment') };
   const form = $('#repaymentForm');
   form.reset();
   form.querySelectorAll('input, select').forEach(control => { control.disabled = false; });
   populateAccounts();
-  const subtype = accountSubtype(account);
   $('#repaymentAccountName').textContent = reviewing ? `查看 ${account.name} 还款` : account.name;
-  $('#repaymentBalanceCopy').textContent = reviewing
-    ? `这笔还款本金 ${formatRM(entry.principalMinor)}${entry.interestMinor ? `，利息与费用 ${formatRM(entry.interestMinor)}` : ''}；当前剩余欠款 ${formatRM(account.balanceMinor)}。如需更正，请移入回收站后重新记录。`
-    : `当前待还 ${formatRM(account.balanceMinor)}；本金降低负债，贷款利息计入当月支出。`;
-  $('#repaymentPrincipal').value = reviewing ? senToAmount(entry.principalMinor) : '';
-  $('#repaymentInterest').value = entry?.interestMinor ? senToAmount(entry.interestMinor) : '';
-  $('#repaymentInterestRow').hidden = subtype !== 'loan';
+  if (reviewing) {
+    $('#repaymentBalanceCopy').textContent = `这笔还款总额 ${formatRM(entry.amountMinor)}，其中减少欠款 ${formatRM(entry.principalMinor)}${entry.interestMinor ? `，利息 ${formatRM(entry.interestMinor)}` : ''}。如需更正，请移入回收站后重新记录。`;
+  } else if (subtype === 'credit_card') {
+    $('#repaymentBalanceCopy').textContent = `当前欠款 ${formatRM(account.balanceMinor)}。默认一次还清；你可以直接改成本次要还的金额。`;
+  } else if (mode === 'fixed_instalment') {
+    $('#repaymentBalanceCopy').textContent = `剩余应付总额 ${formatRM(account.balanceMinor)}。默认月供 ${formatRM(suggestion.amountMinor)}，已包含固定利息。`;
+  } else if (mode === 'reducing_balance') {
+    const rate = account.annualInterestRateBps ? `${(account.annualInterestRateBps / 100).toFixed(2)}%` : '未设置';
+    $('#repaymentBalanceCopy').textContent = `剩余本金 ${formatRM(account.balanceMinor)}，目前年利率 ${rate}。默认还款 ${formatRM(suggestion.amountMinor)}，系统会估算本期利息。`;
+  } else {
+    $('#repaymentBalanceCopy').textContent = `当前欠款 ${formatRM(account.balanceMinor)}。默认还款 ${formatRM(suggestion.amountMinor)}，仍可修改。`;
+  }
+  $('#repaymentAmountLabel').textContent = mode === 'fixed_instalment' ? '本期还款总额' : '本次还款总额';
+  $('#repaymentAmount').value = reviewing ? senToAmount(entry.amountMinor) : suggestion.amountMinor ? senToAmount(suggestion.amountMinor) : '';
+  $('#repaymentInterest').value = reviewing ? senToAmount(entry.interestMinor || 0) : suggestion.interestMinor ? senToAmount(suggestion.interestMinor) : '';
+  $('#repaymentInterestRow').hidden = mode !== 'reducing_balance';
   document.querySelector(`input[name="repaymentFunding"][value="${entry?.accountId ? 'asset' : reviewing ? 'off_ledger' : 'asset'}"]`).checked = true;
   $('#repaymentSourceAccount').value = entry?.accountId ?? assetAccounts()[0]?.id ?? '';
   $('#repaymentDate').value = entry?.occurredAt?.slice(0, 10) ?? today();
@@ -1051,7 +1123,13 @@ function openRepayment(accountId, transactionId = null) {
   const archive = $('#archiveRepaymentButton');
   if (archive) archive.hidden = !reviewing;
   updateRepaymentFunding();
-  if (reviewing) form.querySelectorAll('input, select').forEach(control => { control.disabled = true; });
+  if (reviewing) {
+    $('#repaymentPrincipalPreview').textContent = formatRM(entry.principalMinor);
+    $('#repaymentInterestPreview').textContent = formatRM(entry.interestMinor || 0);
+    $('#repaymentInterestPreviewRow').hidden = !entry.interestMinor;
+    $('#repaymentBreakdown').hidden = false;
+    form.querySelectorAll('input, select').forEach(control => { control.disabled = true; });
+  } else renderRepaymentBreakdown();
   showDialog($('#repaymentDialog'));
 }
 
@@ -1070,7 +1148,7 @@ function ensureRepaymentArchiveButton() {
     try {
       const result = moveToRecycleBin(ledger, pendingRepayment.transactionId, operationId);
       await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, pendingRepayment.transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', pendingRepayment.transactionId, operationId));
-      dismissDialog($('#repaymentDialog'));
+      closeRepayment({ returnToDetail:true });
       showToast('还款已移入回收站。');
     } catch (error) { $('#repaymentMessage').textContent = error.message; }
   });
@@ -1080,10 +1158,11 @@ function bindRenderedControls(root = document) {
   root.querySelectorAll('[data-account-id]').forEach(button => button.addEventListener('click', () => openAccountDetail(button.dataset.accountId)));
   root.querySelectorAll('[data-transaction-id]').forEach(button => button.addEventListener('click', () => {
     const entry = ledger.transactions.find(candidate => candidate.id === button.dataset.transactionId);
+    const fromAccountDetail = $('#accountDetailDialog').open;
     const open = () => entry?.kind === 'repayment'
-      ? openRepayment(entry.targetAccountId, entry.id)
+      ? openRepayment(entry.targetAccountId, entry.id, fromAccountDetail ? selectedAccountDetailId : null)
       : button.dataset.linkedItemId ? openItemFromLedger(button.dataset.linkedItemId, button.dataset.linkedPaymentId) : openEntry(button.dataset.transactionId);
-    if ($('#accountDetailDialog').open) dismissDialog($('#accountDetailDialog'), open);
+    if (fromAccountDetail) dismissDialog($('#accountDetailDialog'), open);
     else open();
   }));
   root.querySelectorAll('[data-add-entry]').forEach(button => button.addEventListener('click', () => openEntry()));
@@ -1125,7 +1204,12 @@ function render() {
 }
 
 function accountOptions(accounts) {
-  return accounts.map(account => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${formatRM(account.balanceMinor)}</option>`).join('');
+  return accounts.map(account => {
+    const subtype = accountSubtype(account);
+    const type = subtype === 'loan' ? loanTypeLabel(account) : accountSubtypeLabel(account);
+    const balance = account.kind === 'liability' ? `欠款 ${formatRM(account.balanceMinor)}` : `余额 ${formatRM(account.balanceMinor)}`;
+    return `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} ｜ ${escapeHtml(type)} ｜ ${escapeHtml(balance)}</option>`;
+  }).join('');
 }
 
 function populateEntryAccounts(kind, sourceId = null, targetId = null) {
@@ -1292,11 +1376,36 @@ function optionalDay(input) {
   return value;
 }
 
+function optionalRate(input) {
+  const text = input.value.trim();
+  if (!text) return null;
+  const value = Number(text);
+  if (!Number.isFinite(value) || value <= 0 || value > 100) throw new Error('贷款年利率必须介于 0.01% 至 100%');
+  return Math.round(value * 100);
+}
+
+function updateLoanFields({ resetMode = false } = {}) {
+  const type = $('#loanType').value;
+  if (resetMode) $('#loanCalculationMode').value = type === 'home' ? 'reducing_balance' : type === 'car' ? 'fixed_instalment' : 'manual';
+  const mode = $('#loanCalculationMode').value;
+  $('#annualInterestRateRow').hidden = mode !== 'reducing_balance';
+  $('#annualInterestRate').required = false;
+  $('#loanCalculationHelp').textContent = mode === 'fixed_instalment'
+    ? '适合传统车贷：月供已包含利息，每期整笔减少剩余应付总额。'
+    : mode === 'reducing_balance'
+      ? '适合房贷与新制递减余额车贷：按当前本金与年利率估算本月利息。'
+      : '不自动计算利息；本次还款金额会直接减少欠款。';
+  $('#scheduledPaymentLabel').textContent = type === 'home' ? '每月计划还款（RM，可选）' : type === 'car' ? '每月固定还款（RM，可选）' : '每期计划还款（RM，可选）';
+  $('#scheduledPaymentHelp').textContent = '记录还款时会自动填入这个金额，仍可修改。';
+  $('#originalPrincipalLabel').textContent = mode === 'fixed_instalment' ? '原始应付总额（RM，可选）' : '原始融资额（RM，可选）';
+}
+
 function updateAccountSubtypeFields() {
   const subtype = document.querySelector('input[name="accountSubtype"]:checked')?.value ?? 'asset';
   $('#creditCardFields').hidden = subtype !== 'credit_card';
   $('#loanFields').hidden = subtype !== 'loan';
-  $('#openingBalanceLabel').textContent = subtype === 'asset' ? '当前余额（RM）' : '当前欠款（RM）';
+  $('#openingBalanceLabel').textContent = subtype === 'asset' ? '当前余额（RM）' : subtype === 'loan' && $('#loanCalculationMode').value === 'fixed_instalment' ? '目前剩余应付总额（RM）' : '当前欠款（RM）';
+  if (subtype === 'loan') updateLoanFields();
 }
 
 function openAccount(id = null) {
@@ -1322,6 +1431,8 @@ function openAccount(id = null) {
   $('#statementDay').value = account?.statementDay ?? '';
   $('#dueDay').value = account?.dueDay ?? '';
   $('#loanType').value = account?.loanType ?? 'car';
+  $('#loanCalculationMode').value = account ? loanCalculationMode(account) : 'fixed_instalment';
+  $('#annualInterestRate').value = account?.annualInterestRateBps ? (account.annualInterestRateBps / 100).toFixed(2) : '';
   $('#originalPrincipal').value = account?.originalPrincipalMinor ? senToAmount(account.originalPrincipalMinor) : '';
   $('#scheduledPayment').value = account?.scheduledPaymentMinor ? senToAmount(account.scheduledPaymentMinor) : '';
   $('#expectedPayoffDate').value = account?.expectedPayoffDate ?? '';
@@ -1384,9 +1495,28 @@ async function exportLocal() {
   }
 }
 
+function closeRepayment({ returnToDetail = false } = {}) {
+  const accountId = returnToDetail ? repaymentReturnAccountId : null;
+  repaymentReturnAccountId = null;
+  pendingRepayment = null;
+  dismissDialog($('#repaymentDialog'), () => {
+    const account = accountId ? accountById(accountId) : null;
+    if (account && !account.archivedAt) openAccountDetail(accountId);
+  });
+}
+
+function openRepaymentFromDetail(accountId, transactionId = null) {
+  if (!navigator.onLine) {
+    openRepayment(accountId, transactionId);
+    return;
+  }
+  dismissDialog($('#accountDetailDialog'), () => openRepayment(accountId, transactionId, accountId));
+}
+
 function requestDialogClose(dialog) {
   if (dialog?.id === 'itemDetailDialog') closeItemDetail();
   else if (dialog?.id === 'receiptViewerDialog') closeReceiptViewer();
+  else if (dialog?.id === 'repaymentDialog') closeRepayment({ returnToDetail:true });
   else dismissDialog(dialog);
 }
 
@@ -1672,11 +1802,20 @@ $('#accountDetailNextPage').addEventListener('click', () => {
 });
 ensureRepaymentArchiveButton();
 document.querySelectorAll('input[name="accountSubtype"]').forEach(input => input.addEventListener('change', updateAccountSubtypeFields));
+$('#loanType').addEventListener('change', () => { updateLoanFields({ resetMode:true }); updateAccountSubtypeFields(); });
+$('#loanCalculationMode').addEventListener('change', updateAccountSubtypeFields);
 document.querySelectorAll('input[name="repaymentFunding"]').forEach(input => input.addEventListener('change', updateRepaymentFunding));
-$('#openRepaymentButton').addEventListener('click', () => openRepayment(selectedAccountDetailId));
+document.querySelectorAll('input[name="appTheme"]').forEach(input => input.addEventListener('change', () => applyTheme(input.value)));
+$('#openRepaymentButton').addEventListener('click', () => openRepaymentFromDetail(selectedAccountDetailId));
+$('#repaymentAmount').addEventListener('input', renderRepaymentBreakdown);
+$('#repaymentInterest').addEventListener('input', renderRepaymentBreakdown);
 $('#repaymentFullButton').addEventListener('click', () => {
   const account = accountById(pendingRepayment?.accountId);
-  if (account && !pendingRepayment?.transactionId) $('#repaymentPrincipal').value = senToAmount(account.balanceMinor);
+  if (!account || pendingRepayment?.transactionId) return;
+  const interestMinor = estimatedMonthlyInterestMinor(account);
+  $('#repaymentAmount').value = senToAmount(account.balanceMinor + interestMinor);
+  if (loanCalculationMode(account) === 'reducing_balance') $('#repaymentInterest').value = interestMinor ? senToAmount(interestMinor) : '';
+  renderRepaymentBreakdown();
 });
 $('#repaymentForm').addEventListener('submit', async event => {
   event.preventDefault();
@@ -1689,16 +1828,15 @@ $('#repaymentForm').addEventListener('submit', async event => {
     if (pendingRepayment.transactionId) throw new Error('既有还款不能直接覆写，请移入回收站后重新记录');
     const account = accountById(pendingRepayment.accountId);
     if (!account || account.kind !== 'liability') throw new Error('还款账户不存在');
-    const principalMinor = amountToSen($('#repaymentPrincipal').value);
-    const interestMinor = accountSubtype(account) === 'loan' && $('#repaymentInterest').value.trim() ? amountToSen($('#repaymentInterest').value) : 0;
+    const breakdown = currentRepaymentBreakdown(account);
     const funding = document.querySelector('input[name="repaymentFunding"]:checked').value;
     const changes = {
       kind:'repayment',
       accountId:funding === 'asset' ? $('#repaymentSourceAccount').value : null,
       targetAccountId:account.id,
-      principalMinor,
-      interestMinor,
-      amountMinor:principalMinor + interestMinor,
+      principalMinor:breakdown.principalMinor,
+      interestMinor:breakdown.interestMinor,
+      amountMinor:breakdown.amountMinor,
       category:null,
       note:$('#repaymentNote').value.trim(),
       occurredAt:`${$('#repaymentDate').value || today()}T12:00:00.000Z`
@@ -1708,7 +1846,7 @@ $('#repaymentForm').addEventListener('submit', async event => {
     const transactionId = pendingRepayment.operationId;
     await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', transactionId, pendingRepayment.operationId));
     pendingRepayment = null;
-    dismissDialog($('#repaymentDialog'));
+    closeRepayment({ returnToDetail:true });
     showToast('还款已保存。');
   } catch (error) { $('#repaymentMessage').textContent = error.message; }
   finally { button.disabled = false; }
@@ -1822,7 +1960,9 @@ $('#accountForm').addEventListener('submit', async event => {
       statementDay:subtype === 'credit_card' ? optionalDay($('#statementDay')) : null,
       dueDay:subtype === 'credit_card' ? optionalDay($('#dueDay')) : null,
       loanType:subtype === 'loan' ? $('#loanType').value : null,
-      originalPrincipalMinor:subtype === 'loan' ? optionalMoney($('#originalPrincipal'), '原始本金') : null,
+      loanCalculationMode:subtype === 'loan' ? $('#loanCalculationMode').value : null,
+      annualInterestRateBps:subtype === 'loan' && $('#loanCalculationMode').value === 'reducing_balance' ? optionalRate($('#annualInterestRate')) : null,
+      originalPrincipalMinor:subtype === 'loan' ? optionalMoney($('#originalPrincipal'), '原始融资额') : null,
       scheduledPaymentMinor:subtype === 'loan' ? optionalMoney($('#scheduledPayment'), '计划还款额') : null,
       expectedPayoffDate:subtype === 'loan' ? ($('#expectedPayoffDate').value || null) : null
     };
@@ -2132,5 +2272,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') requestForegroundRecovery('visibility');
 });
 
+applyTheme(localStorage.getItem(THEME_STORE) || document.documentElement.dataset.theme || 'teal', { persist:false });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
 startRuntime().catch(error => showAuth(`无法启动：${error.message}`));

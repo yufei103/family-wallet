@@ -20,8 +20,8 @@ const legacyAccountRecord = (id, name, overrides = {}) => ({
 });
 const completeAccountRecord = (id, name, overrides = {}) => ({
   ...legacyAccountRecord(id, name), subtype: 'asset', creditLimitMinor: null,
-  statementDay: null, dueDay: null, loanType: null, originalPrincipalMinor: null,
-  scheduledPaymentMinor: null, expectedPayoffDate: null, ...overrides
+  statementDay: null, dueDay: null, loanType: null, loanCalculationMode: null, annualInterestRateBps: null,
+  originalPrincipalMinor: null, scheduledPaymentMinor: null, expectedPayoffDate: null, ...overrides
 });
 
 const authDb = (uid, email) => env.authenticatedContext(uid, { email }).firestore();
@@ -528,7 +528,15 @@ test('新版信用卡消费与还款合法，拆分错误和贷款消费拒绝',
   })));
   await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'accounts', 'loan'), completeAccountRecord('loan', '车贷', {
     kind: 'liability', subtype: 'loan', openingBalanceMinor: 50000, loanType: 'car',
-    originalPrincipalMinor: 50000, scheduledPaymentMinor: 1000, expectedPayoffDate: '2030-02-28'
+    loanCalculationMode:'fixed_instalment', originalPrincipalMinor: 50000, scheduledPaymentMinor: 1000, expectedPayoffDate: '2030-02-28'
+  })));
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'accounts', 'home-loan'), completeAccountRecord('home-loan', '房贷', {
+    kind:'liability', subtype:'loan', openingBalanceMinor:25000000, loanType:'home',
+    loanCalculationMode:'reducing_balance', annualInterestRateBps:420, scheduledPaymentMinor:150000
+  })));
+  await assertFails(setDoc(doc(owner, 'households', householdId, 'accounts', 'bad-fixed-rate'), completeAccountRecord('bad-fixed-rate', '错误固定贷款', {
+    kind:'liability', subtype:'loan', openingBalanceMinor:50000, loanType:'car',
+    loanCalculationMode:'fixed_instalment', annualInterestRateBps:420
   })));
   const tx = (id, overrides) => ({
     id, householdId, operationId: id, actorUid: 'owner-a', kind: 'expense', accountId: 'visa',
@@ -562,7 +570,7 @@ test('ETA 支持旧版缺失、新版日期/null 与元数据编辑，并拒绝�
 test('浏览器 persistence 包含账户子类型字段、还款拆分和 ETA', async () => {
   const source = await readFile('app/firebase-client.js', 'utf8');
   const accountSource = source.slice(source.indexOf('const accountRecord'), source.indexOf('const transactionRecord'));
-  for (const field of ['subtype', 'creditLimitMinor', 'statementDay', 'dueDay', 'loanType', 'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate', 'photoDataUrl']) {
+  for (const field of ['subtype', 'creditLimitMinor', 'statementDay', 'dueDay', 'loanType', 'loanCalculationMode', 'annualInterestRateBps', 'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate', 'photoDataUrl']) {
     assert.match(accountSource, new RegExp(`${field}:`));
   }
   const txSource = source.slice(source.indexOf('const transactionRecord'), source.indexOf('export async function createFirebaseWallet'));

@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   accountSubtype, applyOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger,
-  householdTotals, monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile, remainingPayoffMonths,
-  restoreFromRecycleBin, updateAccount, updateTransaction
+  estimatedMonthlyInterestMinor, householdTotals, loanCalculationMode, monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile,
+  remainingPayoffMonths, repaymentBreakdown, restoreFromRecycleBin, suggestedRepayment, updateAccount, updateTransaction
 } from './ledger.js';
 
 const seed = () => createLedger({ accounts: [
@@ -275,6 +275,34 @@ test('贷款还款总额等于本金加利息，资产扣总额、负债只扣�
   assert.deepEqual(reconcile(ledger), { ok: true, mismatches: [] });
 });
 
+test('马来西亚固定月供车贷默认使用计划金额且整笔减少剩余应付总额', () => {
+  const account = {
+    id:'car-hp', kind:'liability', subtype:'loan', loanType:'car', loanCalculationMode:'fixed_instalment',
+    balanceMinor:500000, scheduledPaymentMinor:119900
+  };
+  assert.equal(loanCalculationMode(account), 'fixed_instalment');
+  assert.deepEqual(suggestedRepayment(account), { amountMinor:119900, principalMinor:119900, interestMinor:0 });
+  assert.deepEqual(repaymentBreakdown(account, 100000), { amountMinor:100000, principalMinor:100000, interestMinor:0 });
+});
+
+test('马来西亚浮动房贷按当前本金与年利率估算利息并从月供拆出本金', () => {
+  const account = {
+    id:'home-loan', kind:'liability', subtype:'loan', loanType:'home', loanCalculationMode:'reducing_balance',
+    balanceMinor:10000000, scheduledPaymentMinor:120000, annualInterestRateBps:420
+  };
+  assert.equal(loanCalculationMode(account), 'reducing_balance');
+  assert.equal(estimatedMonthlyInterestMinor(account), 35000);
+  assert.deepEqual(suggestedRepayment(account), { amountMinor:120000, principalMinor:85000, interestMinor:35000 });
+  assert.deepEqual(repaymentBreakdown(account, 150000), { amountMinor:150000, principalMinor:115000, interestMinor:35000 });
+  assert.deepEqual(repaymentBreakdown(account, 150000, 36000), { amountMinor:150000, principalMinor:114000, interestMinor:36000 });
+  assert.throws(() => repaymentBreakdown(account, 35000), /必须高于本期利息/);
+});
+
+test('信用卡建议金额默认为一次还清当前欠款', () => {
+  const account = { id:'visa', kind:'liability', subtype:'credit_card', balanceMinor:87654 };
+  assert.deepEqual(suggestedRepayment(account), { amountMinor:87654, principalMinor:87654, interestMinor:0 });
+});
+
 test('转账严格限制为资产到账户，负债只能通过还款减少', () => {
   const ledger = liabilitySeed();
   assert.throws(() => applyOperation(ledger, {
@@ -326,7 +354,8 @@ test('创建和更新会校验信用卡及贷款元数据', () => {
   }), /贷款类型无效|预计还清日期无效/);
   const loanLedger = createAccount(seed(), {
     id: 'new-loan', name: '房贷', kind: 'liability', subtype: 'loan', openingBalanceMinor: 25000000,
-    loanType: 'home', originalPrincipalMinor: 30000000, scheduledPaymentMinor: 150000,
+    loanType: 'home', loanCalculationMode:'reducing_balance', annualInterestRateBps:420,
+    originalPrincipalMinor: 30000000, scheduledPaymentMinor: 150000,
     expectedPayoffDate: '2040-08-24'
   });
   assert.equal(loanLedger.accounts.find(account => account.id === 'new-loan').loanType, 'home');

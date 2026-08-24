@@ -113,7 +113,7 @@ export function renderItemCards(items, { formatMoney, mediaCache = new Map(), ho
     const statusText = item.status === 'completed' ? '已付清' : item.status === 'archived' ? '已归档' : `待付 ${balance}`;
     const etaMarkup = etaDescription ? `<small class="item-eta">${escapeHtml(etaDescription)}</small>` : '';
     const accessibleLabel = `查看 ${item.name}，${statusText}${etaDescription ? `，${etaDescription}` : ''}`;
-    return `<button class="item-card" type="button" data-item-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(accessibleLabel)}"><span class="item-cover">${coverMarkup}</span><span class="item-card-copy"><b>${escapeHtml(item.name)}</b><small>已付 ${escapeHtml(paid)} / ${escapeHtml(full)}</small>${etaMarkup}<span class="item-progress" aria-label="已完成 ${item.progress}%"><i style="width:${item.progress}%"></i></span><span class="item-card-foot"><span>余额 ${escapeHtml(balance)}</span><em class="item-status ${item.status}" data-item-status="${item.status}">${escapeHtml(statusText)}</em></span></span></button>`;
+    return `<button class="item-card" type="button" data-item-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(accessibleLabel)}"><span class="item-cover">${coverMarkup}</span><span class="item-card-copy"><b>${escapeHtml(item.name)}</b><small>已付 ${escapeHtml(paid)} / ${escapeHtml(full)}</small>${etaMarkup}<span class="item-progress" aria-label="已完成 ${item.progress}%"><i style="width:${item.progress}%"></i></span><span class="item-card-foot"><em class="item-status ${item.status}" data-item-status="${item.status}">${escapeHtml(statusText)}</em></span></span></button>`;
   }).join('');
 }
 

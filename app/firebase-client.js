@@ -41,6 +41,8 @@ const accountRecord = (account, householdId) => cleanRecord({
   statementDay: account.statementDay ?? null,
   dueDay: account.dueDay ?? null,
   loanType: account.loanType ?? null,
+  loanCalculationMode: account.loanCalculationMode ?? null,
+  annualInterestRateBps: account.annualInterestRateBps ?? null,
   originalPrincipalMinor: account.originalPrincipalMinor ?? null,
   scheduledPaymentMinor: account.scheduledPaymentMinor ?? null,
   expectedPayoffDate: normaliseCalendarDate(account.expectedPayoffDate, '预计还清日期')

@@ -90,6 +90,7 @@ test('物品卡片以不同文字标示三种状态，待付含余额，ETA 保�
   assert.match(html, /data-item-status="active">待付 RM 80\.00<\/em>/);
   assert.match(html, /data-item-status="completed">已付清<\/em>/);
   assert.match(html, /data-item-status="archived">已归档<\/em>/);
+  assert.doesNotMatch(html, />余额 RM/);
   assert.doesNotMatch(html, /<书桌>/);
 
   const escapedMoney = renderItemCards([

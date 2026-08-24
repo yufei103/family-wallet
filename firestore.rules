@@ -61,8 +61,14 @@ service cloud.firestore {
         'photoDataUrl', 'archivedAt', 'creditLimitMinor', 'statementDay', 'dueDay', 'loanType',
         'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate'
       ];
+      let malaysiaLoans = [
+        'id', 'householdId', 'name', 'kind', 'subtype', 'openingBalanceMinor', 'includeInTotal',
+        'photoDataUrl', 'archivedAt', 'creditLimitMinor', 'statementDay', 'dueDay', 'loanType',
+        'loanCalculationMode', 'annualInterestRateBps', 'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate'
+      ];
       return (data.keys().hasAll(legacy) && data.keys().hasOnly(legacy))
-        || (data.keys().hasAll(complete) && data.keys().hasOnly(complete));
+        || (data.keys().hasAll(complete) && data.keys().hasOnly(complete))
+        || (data.keys().hasAll(malaysiaLoans) && data.keys().hasOnly(malaysiaLoans));
     }
     function completeAccount(data) { return data.keys().hasAny(['subtype']); }
     function validAccountSubtype(data) {
@@ -77,10 +83,18 @@ service cloud.firestore {
           : (data.creditLimitMinor == null && data.statementDay == null && data.dueDay == null))
         && (data.subtype == 'loan'
           ? ((data.loanType == null || data.loanType in ['car', 'home', 'other'])
+            && (!data.keys().hasAny(['loanCalculationMode']) || data.loanCalculationMode == null || data.loanCalculationMode in ['fixed_instalment', 'reducing_balance', 'manual'])
+            && (!data.keys().hasAny(['annualInterestRateBps']) || data.annualInterestRateBps == null
+              || (data.annualInterestRateBps is int && data.annualInterestRateBps > 0 && data.annualInterestRateBps <= 10000))
+            && (!data.keys().hasAny(['annualInterestRateBps']) || data.annualInterestRateBps == null
+              || (data.keys().hasAny(['loanCalculationMode']) && data.loanCalculationMode == 'reducing_balance'))
             && (data.originalPrincipalMinor == null || safePositiveMoney(data.originalPrincipalMinor))
             && (data.scheduledPaymentMinor == null || safePositiveMoney(data.scheduledPaymentMinor))
             && optionalCalendarDate(data.expectedPayoffDate))
-          : (data.loanType == null && data.originalPrincipalMinor == null
+          : (data.loanType == null
+            && (!data.keys().hasAny(['loanCalculationMode']) || data.loanCalculationMode == null)
+            && (!data.keys().hasAny(['annualInterestRateBps']) || data.annualInterestRateBps == null)
+            && data.originalPrincipalMinor == null
             && data.scheduledPaymentMinor == null && data.expectedPayoffDate == null))
       );
     }

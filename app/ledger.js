@@ -9,11 +9,60 @@ const byId = (accounts, id) => accounts.find(account => account.id === id);
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const ACCOUNT_SUBTYPES = new Set(['asset', 'credit_card', 'loan', 'generic_liability']);
 const CREDIT_CARD_FIELDS = ['creditLimitMinor', 'statementDay', 'dueDay'];
-const LOAN_FIELDS = ['loanType', 'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate'];
+const LOAN_FIELDS = ['loanType', 'loanCalculationMode', 'annualInterestRateBps', 'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate'];
 const ACCOUNT_METADATA_FIELDS = [...CREDIT_CARD_FIELDS, ...LOAN_FIELDS];
 
 export function accountSubtype(account) {
   return account?.subtype ?? (account?.kind === 'liability' ? 'generic_liability' : 'asset');
+}
+
+export function loanCalculationMode(account) {
+  if (account?.loanCalculationMode) return account.loanCalculationMode;
+  if (account?.loanType === 'home') return 'reducing_balance';
+  if (account?.loanType === 'car') return 'fixed_instalment';
+  return 'manual';
+}
+
+export function estimatedMonthlyInterestMinor(account) {
+  if (accountSubtype(account) !== 'loan' || loanCalculationMode(account) !== 'reducing_balance') return 0;
+  const rateBps = account.annualInterestRateBps ?? 0;
+  if (!Number.isInteger(rateBps) || rateBps <= 0) return 0;
+  return Math.max(0, Math.round(account.balanceMinor * rateBps / 120000));
+}
+
+export function suggestedRepayment(account) {
+  const balanceMinor = Math.max(0, account?.balanceMinor ?? 0);
+  const subtype = accountSubtype(account);
+  if (balanceMinor === 0) return { amountMinor:0, principalMinor:0, interestMinor:0 };
+  if (subtype !== 'loan') return { amountMinor:balanceMinor, principalMinor:balanceMinor, interestMinor:0 };
+  const mode = loanCalculationMode(account);
+  const estimatedInterestMinor = estimatedMonthlyInterestMinor(account);
+  const scheduled = account.scheduledPaymentMinor ?? 0;
+  if (mode === 'fixed_instalment' || mode === 'manual') {
+    const amountMinor = Math.min(balanceMinor, scheduled || balanceMinor);
+    return { amountMinor, principalMinor:amountMinor, interestMinor:0 };
+  }
+  const amountMinor = scheduled || balanceMinor + estimatedInterestMinor;
+  const interestMinor = Math.min(amountMinor, estimatedInterestMinor);
+  const principalMinor = Math.min(balanceMinor, Math.max(0, amountMinor - interestMinor));
+  return { amountMinor:principalMinor + interestMinor, principalMinor, interestMinor };
+}
+
+export function repaymentBreakdown(account, amountMinor, interestOverrideMinor) {
+  money(amountMinor);
+  const subtype = accountSubtype(account);
+  if (subtype !== 'loan' || loanCalculationMode(account) !== 'reducing_balance') {
+    if (amountMinor > account.balanceMinor) throw new Error('还款金额不能超过当前欠款');
+    return { amountMinor, principalMinor:amountMinor, interestMinor:0 };
+  }
+  const interestMinor = interestOverrideMinor === undefined || interestOverrideMinor === null
+    ? Math.min(amountMinor, estimatedMonthlyInterestMinor(account))
+    : nonNegativeMinor(interestOverrideMinor, '还款利息');
+  if (interestMinor > amountMinor) throw new Error('利息不能超过本次还款总额');
+  const principalMinor = amountMinor - interestMinor;
+  if (principalMinor <= 0) throw new Error('还款金额必须高于本期利息');
+  if (principalMinor > account.balanceMinor) throw new Error('还款本金不能超过当前债务');
+  return { amountMinor, principalMinor, interestMinor };
 }
 
 const subtypeKind = subtype => subtype === 'asset' ? 'asset' : 'liability';
@@ -56,6 +105,15 @@ const validateAccountContract = account => {
   if (subtype === 'loan') {
     if (account.loanType !== null && account.loanType !== undefined && !['car', 'home', 'other'].includes(account.loanType)) {
       throw new Error('贷款类型无效');
+    }
+    if (account.loanCalculationMode !== null && account.loanCalculationMode !== undefined && !['fixed_instalment', 'reducing_balance', 'manual'].includes(account.loanCalculationMode)) {
+      throw new Error('贷款计算方式无效');
+    }
+    if (account.annualInterestRateBps !== null && account.annualInterestRateBps !== undefined && (!Number.isInteger(account.annualInterestRateBps) || account.annualInterestRateBps <= 0 || account.annualInterestRateBps > 10000)) {
+      throw new Error('贷款年利率必须介于 0.01% 至 100%');
+    }
+    if (loanCalculationMode(account) !== 'reducing_balance' && account.annualInterestRateBps !== null && account.annualInterestRateBps !== undefined) {
+      throw new Error('只有递减余额贷款需要年利率');
     }
     positiveOptionalMinor(account.originalPrincipalMinor, '原始本金');
     positiveOptionalMinor(account.scheduledPaymentMinor, '计划还款额');
