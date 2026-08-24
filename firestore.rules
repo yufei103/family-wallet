@@ -121,7 +121,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'householdId', 'name', 'note', 'fullPriceMinor', 'paidMinor', 'status', 'coverMediaId',
           'createdByUid', 'createdAt', 'updatedByUid', 'updatedAt', 'archivedAt', 'revision',
-          'lastOperationId', 'lastPaymentId', 'etaDate'
+          'lastOperationId', 'lastPaymentId', 'etaDate', 'deletedAt', 'deletedByUid'
         ])
         && data.id == itemId
         && data.householdId == householdId
@@ -141,6 +141,10 @@ service cloud.firestore {
         && nonEmpty(data.lastOperationId, 200)
         && (data.lastPaymentId == null || nonEmpty(data.lastPaymentId, 200))
         && (!data.keys().hasAny(['etaDate']) || optionalCalendarDate(data.etaDate))
+        && (!data.keys().hasAny(['deletedAt']) || data.deletedAt == null || nonEmpty(data.deletedAt, 100))
+        && (!data.keys().hasAny(['deletedByUid']) || data.deletedByUid == null || nonEmpty(data.deletedByUid, 200))
+        && ((!data.keys().hasAny(['deletedAt']) || data.deletedAt == null)
+          == (!data.keys().hasAny(['deletedByUid']) || data.deletedByUid == null))
         && ((data.status == 'archived') == (data.archivedAt != null))
         && (data.status != 'completed' || data.paidMinor == data.fullPriceMinor)
         && (data.status != 'active' || data.paidMinor < data.fullPriceMinor);
@@ -161,6 +165,8 @@ service cloud.firestore {
         && data.updatedByUid == request.auth.uid
         && data.createdAt == data.updatedAt
         && data.archivedAt == null
+        && itemNotDeleted(data)
+        && (!data.keys().hasAny(['deletedByUid']) || data.deletedByUid == null)
         && data.revision == 1
         && validMediaReferenceAfter(householdId, itemId, data.coverMediaId, 'cover', null)
         && (
@@ -186,6 +192,15 @@ service cloud.firestore {
         ? (after.keys().hasAny(['etaDate']) && after.etaDate == before.etaDate)
         : !after.keys().hasAny(['etaDate']);
     }
+    function itemNotDeleted(data) {
+      return !data.keys().hasAny(['deletedAt']) || data.deletedAt == null;
+    }
+    function deletedStatePreserved(after, before) {
+      return before.keys().hasAny(['deletedAt'])
+        ? (after.keys().hasAny(['deletedAt']) && after.deletedAt == before.deletedAt
+          && after.keys().hasAny(['deletedByUid']) && after.deletedByUid == before.deletedByUid)
+        : !after.keys().hasAny(['deletedAt', 'deletedByUid']);
+    }
     function itemPaymentMutation(after, before, householdId) {
       let paymentId = after.lastPaymentId;
       return paymentId != null
@@ -196,6 +211,8 @@ service cloud.firestore {
         && after.fullPriceMinor == before.fullPriceMinor
         && after.name == before.name && after.note == before.note && after.coverMediaId == before.coverMediaId
         && etaPreserved(after, before)
+        && itemNotDeleted(before) && itemNotDeleted(after)
+        && deletedStatePreserved(after, before)
         && existsAfter(paymentPath(householdId, paymentId))
         && getAfter(paymentPath(householdId, paymentId)).data.itemId == after.id
         && getAfter(paymentPath(householdId, paymentId)).data.lastOperationId == after.lastOperationId
@@ -228,6 +245,8 @@ service cloud.firestore {
         && after.paidMinor == before.paidMinor
         && after.lastPaymentId == before.lastPaymentId
         && before.archivedAt == null && after.archivedAt == null
+        && itemNotDeleted(before) && itemNotDeleted(after)
+        && deletedStatePreserved(after, before)
         && after.status == (after.paidMinor == after.fullPriceMinor ? 'completed' : 'active')
         && validMediaReferenceAfter(householdId, after.id, after.coverMediaId, 'cover', null);
     }
@@ -239,6 +258,8 @@ service cloud.firestore {
         && after.fullPriceMinor == before.fullPriceMinor && after.paidMinor == before.paidMinor
         && after.coverMediaId == before.coverMediaId && after.lastPaymentId == before.lastPaymentId
         && etaPreserved(after, before)
+        && itemNotDeleted(before) && itemNotDeleted(after)
+        && deletedStatePreserved(after, before)
         && (
           (before.archivedAt == null && before.status == 'completed'
             && before.paidMinor == before.fullPriceMinor
@@ -248,6 +269,26 @@ service cloud.firestore {
             && after.status == (after.paidMinor == after.fullPriceMinor ? 'completed' : 'active'))
         );
     }
+    function itemDeleteMutation(after, before) {
+      return after.diff(before).affectedKeys().hasOnly([
+          'status', 'deletedAt', 'deletedByUid', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId'
+        ])
+        && before.archivedAt == null && after.archivedAt == null
+        && before.paidMinor == 0 && after.paidMinor == 0
+        && after.status == 'active'
+        && after.name == before.name && after.note == before.note
+        && after.fullPriceMinor == before.fullPriceMinor
+        && after.coverMediaId == before.coverMediaId && after.lastPaymentId == before.lastPaymentId
+        && etaPreserved(after, before)
+        && (
+          (itemNotDeleted(before)
+            && after.keys().hasAll(['deletedAt', 'deletedByUid'])
+            && after.deletedAt == after.updatedAt && after.deletedByUid == request.auth.uid)
+          || (!itemNotDeleted(before)
+            && after.keys().hasAll(['deletedAt', 'deletedByUid'])
+            && after.deletedAt == null && after.deletedByUid == null)
+        );
+    }
     function validItemUpdate(after, before, householdId, itemId) {
       return validItemShape(after, householdId, itemId)
         && immutableItemFields(after, before)
@@ -255,7 +296,8 @@ service cloud.firestore {
         && after.updatedByUid == request.auth.uid
         && (itemPaymentMutation(after, before, householdId)
           || itemMetadataMutation(after, before, householdId)
-          || itemArchiveMutation(after, before));
+          || itemArchiveMutation(after, before)
+          || itemDeleteMutation(after, before));
     }
     function validPaymentShape(data, householdId, paymentId) {
       return data.keys().hasAll([
@@ -307,6 +349,7 @@ service cloud.firestore {
         && data.actorUid == request.auth.uid && data.updatedByUid == request.auth.uid
         && data.createdAt == data.updatedAt
         && existsAfter(itemPath(householdId, data.itemId))
+        && itemNotDeleted(getAfter(itemPath(householdId, data.itemId)).data)
         && getAfter(itemPath(householdId, data.itemId)).data.lastPaymentId == paymentId
         && (
           (!exists(itemPath(householdId, data.itemId))
@@ -333,6 +376,7 @@ service cloud.firestore {
         && ((before.status == 'active' && after.status == 'voided' && after.voidedAt == after.updatedAt)
           || (before.status == 'voided' && after.status == 'active' && after.voidedAt == null))
         && existsAfter(itemPath(householdId, after.itemId))
+        && itemNotDeleted(getAfter(itemPath(householdId, after.itemId)).data)
         && getAfter(itemPath(householdId, after.itemId)).data.lastPaymentId == paymentId
         && getAfter(itemPath(householdId, after.itemId)).data.lastOperationId == after.lastOperationId
         && getAfter(itemPath(householdId, after.itemId)).data.updatedAt == after.updatedAt

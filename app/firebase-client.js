@@ -346,6 +346,12 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     return snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
   }
 
+  async function loadItemPayments(householdId, itemId) {
+    const payments = query(collection(db, 'households', householdId, 'itemPayments'), where('itemId', '==', itemId));
+    const snapshot = await getDocs(payments);
+    return snapshot.docs.map(item => ({ id:item.id, ...item.data() }));
+  }
+
   /** One-shot metadata-only backup read; item media bytes remain excluded. */
   async function loadAllItemPayments(householdId) {
     const snapshot = await getDocs(collection(db, 'households', householdId, 'itemPayments'));
@@ -385,7 +391,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
       status: payment?.amountMinor === fullPriceMinor ? 'completed' : 'active',
       coverMediaId: cover?.id ?? input.coverMediaId ?? null,
       createdByUid: actorUid, createdAt, updatedByUid: actorUid, updatedAt: createdAt,
-      archivedAt: null, revision: 1, lastOperationId: operationId,
+      archivedAt: null, deletedAt: null, deletedByUid: null, revision: 1, lastOperationId: operationId,
       lastPaymentId: paymentId
     };
     if (item.coverMediaId && !cover) throw new Error('新封面引用必须随 coverMedia 一起写入');
@@ -440,6 +446,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
         throw new Error('paymentId/operationId 已用于不同载荷');
       }
       assertRevision(item, input.expectedRevision);
+      if (item.deletedAt) throw new Error('已删除物品必须先从回收站恢复');
       if (item.archivedAt || item.status === 'archived') throw new Error('已归档物品必须先恢复');
       if (item.paidMinor + payment.amountMinor > item.fullPriceMinor) throw new Error('付款会超过物品全价');
       const nextItem = {
@@ -479,6 +486,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
       if (payment.lastOperationId === operationId && payment.status === targetStatus) return { item, payment, duplicate: true };
       assertRevision(item, input.expectedRevision);
       if (payment.itemId !== itemId) throw new Error('付款不属于指定物品');
+      if (item.deletedAt) throw new Error('已删除物品必须先从回收站恢复');
       if (item.archivedAt || item.status === 'archived') throw new Error('已归档物品必须先恢复');
       if (action === 'void' && payment.status !== 'active') throw new Error('付款已作废');
       if (action === 'restore' && payment.status !== 'voided') throw new Error('付款未作废');
@@ -560,6 +568,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
       }
       if (requestedCoverId && requestedCoverId !== item.coverMediaId && !cover) throw new Error('新封面引用必须随 coverMedia 一起写入');
       assertRevision(item, input.expectedRevision);
+      if (item.deletedAt) throw new Error('已删除物品必须先从回收站恢复');
       if (item.archivedAt || item.status === 'archived') throw new Error('已归档物品必须先恢复');
       const nextItem = {
         ...item,
@@ -588,6 +597,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
       if (!snapshot.exists()) throw new Error('物品不存在');
       const item = snapshot.data();
       const targetArchived = action === 'archive';
+      if (item.deletedAt) throw new Error('已删除物品请从回收站恢复');
       if (item.lastOperationId === operationId && Boolean(item.archivedAt) === targetArchived) return { item, duplicate: true };
       assertRevision(item, input.expectedRevision);
       if (targetArchived) {
@@ -610,6 +620,43 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
 
   const archiveItem = input => mutateArchive(input, 'archive');
   const restoreItem = input => mutateArchive(input, 'restore');
+
+  async function mutateDeletedItem(input, action) {
+    requireOnline();
+    const householdId = requiredId(input.householdId, 'householdId');
+    const itemId = requiredId(input.itemId, 'itemId');
+    const operationId = requiredId(input.operationId, 'operationId');
+    const actorUid = currentActor(input.actorUid);
+    const updatedAt = input.updatedAt ?? now();
+    return runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(itemRef(householdId, itemId));
+      if (!snapshot.exists()) throw new Error('物品不存在');
+      const item = snapshot.data();
+      const targetDeleted = action === 'delete';
+      if (item.lastOperationId === operationId && Boolean(item.deletedAt) === targetDeleted) return { item, duplicate:true };
+      assertRevision(item, input.expectedRevision);
+      if (targetDeleted) {
+        if (item.deletedAt) throw new Error('物品已删除');
+        if (item.archivedAt || item.status === 'archived') throw new Error('请先恢复已归档物品');
+        if (item.paidMinor !== 0) throw new Error('请先作废此物品的所有付款');
+      } else if (!item.deletedAt) throw new Error('物品不在回收站');
+      const nextItem = {
+        ...item,
+        status:'active',
+        deletedAt:targetDeleted ? updatedAt : null,
+        deletedByUid:targetDeleted ? actorUid : null,
+        updatedByUid:actorUid,
+        updatedAt,
+        revision:item.revision + 1,
+        lastOperationId:operationId
+      };
+      transaction.set(itemRef(householdId, itemId), nextItem);
+      return { item:nextItem, duplicate:false };
+    });
+  }
+
+  const deleteItem = input => mutateDeletedItem(input, 'delete');
+  const restoreDeletedItem = input => mutateDeletedItem(input, 'restore');
 
   async function inviteMember({ householdId, email, ownerUid, ownerEmail, ownerDisplayName }) {
     const emailLower = cleanEmail(email);
@@ -701,6 +748,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     subscribeItems,
     subscribeItemPayments,
     loadItemMedia,
+    loadItemPayments,
     loadAllItemPayments,
     createItem,
     addItemPayment,
@@ -709,6 +757,8 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     editItem,
     archiveItem,
     restoreItem,
+    deleteItem,
+    restoreDeletedItem,
     selectHousehold: (uid, householdId) => updateDoc(doc(db, 'users', uid), { selectedHouseholdId: householdId }),
     inviteMember,
     watchInvite,

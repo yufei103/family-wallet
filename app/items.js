@@ -3,7 +3,8 @@ const PAYMENT_TYPES = new Set(['deposit', 'payment']);
 const PAYMENT_MODES = new Set(['linked', 'independent']);
 const ITEM_FINGERPRINT_BOOKKEEPING_FIELDS = new Set([
   'id', 'name', 'fullPriceMinor', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy',
-  'actor', 'actorId', 'status', 'archivedAt', 'archivedBy', 'restoredAt', 'restoredBy', 'lifecycle'
+  'actor', 'actorId', 'status', 'archivedAt', 'archivedBy', 'deletedAt', 'deletedBy',
+  'restoredAt', 'restoredBy', 'lifecycle'
 ]);
 
 const clone = value => structuredClone(value);
@@ -62,6 +63,7 @@ function requireItem(state, itemId) {
 
 function requireMutableItem(state, itemId) {
   const item = requireItem(state, itemId);
+  if (item.deletedAt) throw new Error('已删除物品必须先从回收站恢复');
   if (item.status === 'archived' || item.archivedAt) throw new Error('已归档物品必须先恢复才能修改');
   return item;
 }
@@ -123,6 +125,8 @@ function normaliseItem(raw, index) {
   item.status = ITEM_STATUSES.has(item.status) ? item.status : (item.archivedAt ? 'archived' : 'active');
   item.etaDate = normaliseEtaDate(item.etaDate);
   item.archivedAt = item.archivedAt ?? (item.status === 'archived' ? item.updatedAt ?? item.createdAt : null);
+  item.deletedAt = item.deletedAt ?? null;
+  item.deletedBy = item.deletedBy ?? null;
   item.createdBy = item.createdBy ?? item.actor ?? null;
   item.updatedAt = item.updatedAt ?? item.createdAt;
   item.updatedBy = item.updatedBy ?? item.createdBy;
@@ -275,6 +279,8 @@ export function createItem(state, input, options = {}) {
     updatedBy: merged.createdBy ?? actor,
     archivedAt: null,
     archivedBy: null,
+    deletedAt: null,
+    deletedBy: null,
     restoredAt: null,
     restoredBy: null,
     lifecycle: [{ type: 'itemCreated', at: createdAt, actor: merged.createdBy ?? actor, operationId }]
@@ -465,7 +471,7 @@ export function archiveItem(state, itemId, operation = {}) {
   const signature = fingerprint({ kind: 'archiveItem', itemId });
   if (checkDuplicate(current, operationId, signature)) return duplicateResult(current, { item: requireItem(current, itemId) });
   assertExpectedRevision(current, input.expectedRevision);
-  const existing = requireItem(current, itemId);
+  const existing = requireMutableItem(current, itemId);
   if (existing.archivedAt || existing.status === 'archived') throw new Error('物品已归档');
   if (existing.status !== 'completed' || paidMinorFor(current, itemId) !== existing.fullPriceMinor) {
     throw new Error('物品必须结清并完成后才能归档');
@@ -493,6 +499,7 @@ export function restoreItem(state, itemId, operation = {}) {
   if (checkDuplicate(current, operationId, signature)) return duplicateResult(current, { item: requireItem(current, itemId) });
   assertExpectedRevision(current, input.expectedRevision);
   const existing = requireItem(current, itemId);
+  if (existing.deletedAt) throw new Error('已删除物品请从回收站恢复');
   if (!existing.archivedAt && existing.status !== 'archived') throw new Error('物品未归档');
   const next = nextState(current);
   const item = requireItem(next, itemId);
@@ -508,6 +515,56 @@ export function restoreItem(state, itemId, operation = {}) {
   item.lifecycle.push({ type: 'itemRestored', at, actor, operationId });
   next.revision += 1;
   rememberOperation(next, operationId, 'restoreItem', itemId, signature);
+  return mutationResult(next, { item });
+}
+
+export function deleteItem(state, itemId, operation = {}) {
+  const current = asItemsState(state);
+  const input = operationInput(operation);
+  const operationId = nonEmptyId(input.operationId, 'operationId');
+  const signature = fingerprint({ kind:'deleteItem', itemId });
+  if (checkDuplicate(current, operationId, signature)) return duplicateResult(current, { item: requireItem(current, itemId) });
+  assertExpectedRevision(current, input.expectedRevision);
+  const existing = requireMutableItem(current, itemId);
+  if (paidMinorFor(current, itemId) !== 0) throw new Error('请先作废此物品的所有付款');
+  const next = nextState(current);
+  const item = requireItem(next, itemId);
+  const at = nowIso(input.deletedAt ?? input.occurredAt);
+  const actor = actorOf(input);
+  item.deletedAt = at;
+  item.deletedBy = actor;
+  item.updatedAt = at;
+  item.updatedBy = actor;
+  item.lifecycle.push({ type:'itemDeleted', at, actor, operationId });
+  next.revision += 1;
+  rememberOperation(next, operationId, 'deleteItem', itemId, signature);
+  return mutationResult(next, { item });
+}
+
+export function restoreDeletedItem(state, itemId, operation = {}) {
+  const current = asItemsState(state);
+  const input = operationInput(operation);
+  const operationId = nonEmptyId(input.operationId, 'operationId');
+  const signature = fingerprint({ kind:'restoreDeletedItem', itemId });
+  if (checkDuplicate(current, operationId, signature)) return duplicateResult(current, { item: requireItem(current, itemId) });
+  assertExpectedRevision(current, input.expectedRevision);
+  const existing = requireItem(current, itemId);
+  if (!existing.deletedAt) throw new Error('物品不在回收站');
+  if (paidMinorFor(current, itemId) !== 0) throw new Error('删除物品的付款状态不一致');
+  const next = nextState(current);
+  const item = requireItem(next, itemId);
+  const at = nowIso(input.restoredAt ?? input.occurredAt);
+  const actor = actorOf(input);
+  item.deletedAt = null;
+  item.deletedBy = null;
+  item.restoredAt = at;
+  item.restoredBy = actor;
+  item.updatedAt = at;
+  item.updatedBy = actor;
+  refreshItemStatus(next, item);
+  item.lifecycle.push({ type:'itemDeleteRestored', at, actor, operationId });
+  next.revision += 1;
+  rememberOperation(next, operationId, 'restoreDeletedItem', itemId, signature);
   return mutationResult(next, { item });
 }
 

@@ -42,7 +42,7 @@
         <select class="workspace-select" id="workspaceSelect" aria-label="选择个人或家庭账本"></select>
         <button class="icon-button" id="inviteMemberButton" type="button" aria-label="邀请家庭成员" title="邀请家庭成员">＋</button>
         <button class="icon-button more-button" id="moreButton" type="button" aria-label="设置与数据" title="设置与数据">⋯</button>
-        <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；点按可重试">准备中</button>
+        <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；已同步时点按可刷新App">准备中</button>
       </div>
     </header>
 
@@ -271,12 +271,14 @@
         </div>
       </div>
       <label class="field"><span>账户名称</span><input id="accountName" required maxlength="40" placeholder="例如：现金、Maybank、车贷"></label>
-      <fieldset class="segmented account-subtype-control" id="accountSubtypeControl">
+      <fieldset class="account-subtype-control" id="accountSubtypeControl">
         <legend>账户类型</legend>
-        <label><input type="radio" name="accountSubtype" value="asset" checked><span>可用资金</span></label>
-        <label><input type="radio" name="accountSubtype" value="credit_card"><span>信用卡</span></label>
-        <label><input type="radio" name="accountSubtype" value="loan"><span>贷款</span></label>
-        <label hidden><input type="radio" name="accountSubtype" value="generic_liability"><span>其他负债</span></label>
+        <div class="account-subtype-options">
+          <label><input type="radio" name="accountSubtype" value="asset" checked><span>可用资金</span></label>
+          <label><input type="radio" name="accountSubtype" value="credit_card"><span>信用卡</span></label>
+          <label><input type="radio" name="accountSubtype" value="loan"><span>贷款</span></label>
+          <label hidden><input type="radio" name="accountSubtype" value="generic_liability"><span>其他负债</span></label>
+        </div>
       </fieldset>
       <div class="subtype-fields" id="creditCardFields" hidden>
         <label class="field"><span>信用额度（RM，可选）</span><input id="creditLimit" inputmode="decimal" placeholder="0.00"></label>
@@ -365,7 +367,7 @@
         <div><p class="sheet-context">安全恢复</p><h2>回收站</h2></div>
         <button class="icon-button" id="closeRecycleButton" type="button" aria-label="关闭">×</button>
       </div>
-      <p class="sheet-description">移除账目会先反算余额。永久删除前仍可恢复。</p>
+      <p class="sheet-description">移除的普通账目和物品会先放在这里。恢复物品后，已作废付款仍由你逐笔决定是否恢复。</p>
       <div class="recycle-list" id="recycleList"></div>
     </div>
   </dialog>
@@ -444,6 +446,7 @@
         <button class="minor-button" id="editItemButton" data-mutation type="button">编辑</button>
         <button class="minor-button" id="archiveItemButton" data-mutation type="button" hidden>归档</button>
         <button class="minor-button" id="restoreItemButton" data-mutation type="button" hidden>恢复收藏</button>
+        <button class="minor-button delete" id="deleteItemButton" data-mutation type="button">删除物品</button>
       </div>
       <p class="form-message" id="itemDetailMessage" aria-live="polite"></p>
       <div class="section-row item-timeline-heading"><div><h3>付款时间线</h3><p id="itemPaymentCount">载入中…</p></div></div>

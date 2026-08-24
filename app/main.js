@@ -4,9 +4,10 @@ import {
   remainingPayoffMonths, serialiseLedger, suggestedRepayment, updateAccount, updateTransaction
 } from './ledger.js';
 import {
-  archiveItem as archiveLocalItem, createItem as createLocalItem, createItemsState, editItem as editLocalItem,
-  recordItemPayment as recordLocalItemPayment, restoreItem as restoreLocalItem,
-  restoreItemPayment as restoreLocalItemPayment, serialiseItemsState, voidItemPayment as voidLocalItemPayment
+  archiveItem as archiveLocalItem, createItem as createLocalItem, createItemsState, deleteItem as deleteLocalItem,
+  editItem as editLocalItem, recordItemPayment as recordLocalItemPayment, restoreDeletedItem as restoreDeletedLocalItem,
+  restoreItem as restoreLocalItem, restoreItemPayment as restoreLocalItemPayment, serialiseItemsState,
+  voidItemPayment as voidLocalItemPayment
 } from './items.js';
 import { compressItemMedia } from './item-media.js';
 import { createSyncCoordinator } from './cloud-sync.js';
@@ -156,11 +157,19 @@ function renderSyncStatus(state = syncCoordinator.getState()) {
   const status = state.status === 'offline' ? 'offline' : itemListenerError ? 'error' : state.status;
   const labels = {
     loading:'载入中', cached:'已缓存', pending:state.pendingCount ? `${state.pendingCount} 项待同步` : '待同步',
-    synced:'已同步', offline:state.pendingCount ? `离线 · ${state.pendingCount} 项排队` : '离线',
+    synced:'已同步 ↻', offline:state.pendingCount ? `离线 · ${state.pendingCount} 项排队` : '离线',
     recovering:'恢复中', error:'同步错误 · 重试'
   };
   setSyncState(labels[status] ?? '准备中', status === 'error', status);
-  $('#syncBadge').title = status === 'error' ? (itemListenerError || state.error || '点按重试') : labels[status];
+  const badge = $('#syncBadge');
+  badge.title = status === 'synced'
+    ? '资料已同步；点按刷新 App'
+    : status === 'error'
+      ? (itemListenerError || state.error || '点按重试同步')
+      : `${labels[status] ?? '准备中'}；点按重新检查同步`;
+  badge.setAttribute('aria-label', status === 'synced'
+    ? '资料已同步；点按刷新App'
+    : `同步状态：${labels[status] ?? '准备中'}；点按重新检查`);
 }
 
 function setSwitching(value) {
@@ -428,7 +437,7 @@ function observeLazyCovers() {
 
 function renderItemsView() {
   if (runtimeMode === 'local') itemRecords = displayItemsFromLocal(itemsState);
-  const visible = itemRecords.filter(item => itemFilter === 'archived'
+  const visible = itemRecords.filter(item => !item.deletedAt).filter(item => itemFilter === 'archived'
     ? item.status === 'archived' || Boolean(item.archivedAt)
     : item.status !== 'archived' && !item.archivedAt
   ).sort((a, b) => String(b.updatedAt ?? b.createdAt ?? '').localeCompare(String(a.updatedAt ?? a.createdAt ?? '')));
@@ -526,6 +535,7 @@ function renderItemDetail() {
   $('#editItemButton').disabled = archived;
   $('#archiveItemButton').hidden = archived || item.status !== 'completed';
   $('#restoreItemButton').hidden = !archived;
+  $('#deleteItemButton').hidden = archived;
   $('#itemPaymentCount').textContent = `${currentItemPayments.length} 笔记录`;
   $('#itemPaymentTimeline').innerHTML = paymentTimelineMarkup(currentItemPayments);
   const householdId = currentMediaHouseholdId();
@@ -578,7 +588,7 @@ function closeItemDetail(afterClose) {
 
 function openItemDetail(itemId, paymentId = null) {
   const item = itemById(itemId);
-  if (!item) {
+  if (!item || item.deletedAt) {
     showToast('物品尚未同步或已被移除。');
     return;
   }
@@ -778,6 +788,77 @@ async function runItemLifecycle(action, button) {
   }
 }
 
+async function deleteSelectedItem(button) {
+  const item = itemById(selectedItemId);
+  if (!item || item.deletedAt) return;
+  if (item.archivedAt || item.status === 'archived') {
+    $('#itemDetailMessage').textContent = '请先恢复已归档物品，再删除。';
+    return;
+  }
+  if (usesCloudStore() && !navigator.onLine) {
+    $('#itemDetailMessage').textContent = '删除物品需要联网。';
+    return;
+  }
+  if (!confirm(`删除「${item.name}」？所有仍生效的物品付款会作废，关联账目会移入回收状态，不再计入支出。`)) return;
+  const key = `${currentMediaHouseholdId()}:delete:item:${item.id}`;
+  const groupOperationId = actionOperationId(key, 'item-delete-group');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '撤销付款中…';
+  $('#itemDetailMessage').textContent = '';
+  try {
+    if (usesCloudStore()) {
+      let latestItem = item;
+      const payments = (await cloud.loadItemPayments(currentHousehold.id, item.id))
+        .filter(payment => payment.status === 'active' && !payment.voidedAt)
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id));
+      for (const payment of payments) {
+        const result = await cloud.voidItemPayment({
+          householdId:currentHousehold.id, itemId:item.id, paymentId:payment.id,
+          operationId:`${groupOperationId}:void:${payment.id}`,
+          expectedRevision:latestItem.revision, actorUid:cloudUser.uid
+        });
+        latestItem = result.item;
+        upsertItemRecord(result.item);
+        upsertCurrentPayment(result.payment);
+      }
+      button.textContent = '删除物品中…';
+      const result = await cloud.deleteItem({
+        householdId:currentHousehold.id, itemId:item.id,
+        operationId:`${groupOperationId}:final`, expectedRevision:latestItem.revision, actorUid:cloudUser.uid
+      });
+      upsertItemRecord(result.item);
+    } else {
+      let nextState = itemsState;
+      let nextLedger = ledger;
+      const payments = nextState.itemPayments
+        .filter(payment => payment.itemId === item.id && !payment.voidedAt)
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id));
+      for (const payment of payments) {
+        const result = voidLocalItemPayment(nextState, item.id, payment.id, {
+          operationId:`${groupOperationId}:void:${payment.id}`, expectedRevision:nextState.revision, actor:'local'
+        });
+        nextLedger = applyLinkedExpenseSpec(nextLedger, result.expenseSpec, result.payment.voidedAt);
+        nextState = result.state;
+      }
+      const deleted = deleteLocalItem(nextState, item.id, {
+        operationId:`${groupOperationId}:final`, expectedRevision:nextState.revision, actor:'local'
+      });
+      commitLocalItemMutation(nextLedger, deleted.state, new Map(localItemMedia));
+    }
+    itemActionOperations.delete(key);
+    closeItemDetail(() => {
+      render();
+      showToast('物品已移入回收站，相关付款不再计入账目。');
+    });
+  } catch (error) {
+    $('#itemDetailMessage').textContent = `${error.message}；若部分付款已撤销，请保持联网后再按一次删除继续。`;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 async function correctItemPayment(action, paymentId, button) {
   const item = itemById(selectedItemId);
   const payment = currentItemPayments.find(candidate => candidate.id === paymentId);
@@ -939,7 +1020,7 @@ function renderUpcomingActions() {
     }
   }
   for (const item of itemRecords) {
-    if (!item.etaDate || item.archivedAt || item.status === 'archived') continue;
+    if (item.deletedAt || !item.etaDate || item.archivedAt || item.status === 'archived') continue;
     actions.push({ type:'item', id:item.id, sortDate:item.etaDate, icon:'物', iconClass:'eta', title:`${item.name} 预计到货`, detail:item.balanceMinor > 0 ? `待付 ${formatRM(item.balanceMinor)}` : '已付清', value:describeEtaDate(item.etaDate, today()) });
   }
   actions.sort((a, b) => a.sortDate.localeCompare(b.sortDate) || a.title.localeCompare(b.title, 'zh-CN'));
@@ -1450,10 +1531,59 @@ function openAccount(id = null) {
   setTimeout(() => $('#accountName').focus(), 30);
 }
 
-function renderRecycle() {
-  const deleted = ledger.transactions.filter(entry => entry.deletedAt).sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
-  $('#recycleList').innerHTML = deleted.length ? deleted.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">−</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button" data-restore="${escapeHtml(entry.id)}">恢复</button><button class="minor-button delete" data-delete="${escapeHtml(entry.id)}">永久删除</button></div></div></div>`).join('') : '<div class="empty-state"><b>回收站是空的</b><p>移除的账目会先放在这里，方便恢复。</p></div>';
+async function restoreDeletedItemFromRecycle(itemId, button) {
+  const item = itemById(itemId);
+  if (!item?.deletedAt) return;
+  if (usesCloudStore() && !navigator.onLine) {
+    showToast('恢复物品需要联网。');
+    return;
+  }
+  const key = `${currentMediaHouseholdId()}:restore-deleted:item:${item.id}`;
+  const operationId = actionOperationId(key, 'item-restore-deleted');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '恢复中…';
+  try {
+    if (usesCloudStore()) {
+      const result = await cloud.restoreDeletedItem({
+        householdId:currentHousehold.id, itemId:item.id, operationId,
+        expectedRevision:item.revision, actorUid:cloudUser.uid
+      });
+      upsertItemRecord(result.item);
+    } else {
+      const result = restoreDeletedLocalItem(itemsState, item.id, {
+        operationId, expectedRevision:itemsState.revision, actor:'local'
+      });
+      commitLocalItemMutation(ledger, result.state, new Map(localItemMedia));
+    }
+    itemActionOperations.delete(key);
+    render();
+    renderRecycle();
+    showToast('物品已恢复；原付款仍保持作废，可在物品详情逐笔恢复。');
+  } catch (error) {
+    showToast(`无法恢复物品：${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
 
+function renderRecycle() {
+  const deletedItems = itemRecords
+    .filter(item => item.deletedAt)
+    .sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+  const deletedEntries = ledger.transactions
+    .filter(entry => entry.deletedAt && entry.sourceType !== 'itemPayment')
+    .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
+  const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">物</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button" data-restore-deleted-item="${escapeHtml(item.id)}">恢复物品</button></div></div></div>`).join('');
+  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">−</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button" data-restore="${escapeHtml(entry.id)}">恢复</button><button class="minor-button delete" data-delete="${escapeHtml(entry.id)}">永久删除</button></div></div></div>`).join('');
+  $('#recycleList').innerHTML = itemMarkup || entryMarkup
+    ? `${itemMarkup}${entryMarkup}`
+    : '<div class="empty-state"><b>回收站是空的</b><p>移除的普通账目和物品会显示在这里。</p></div>';
+
+  document.querySelectorAll('[data-restore-deleted-item]').forEach(button => button.addEventListener('click', () => {
+    restoreDeletedItemFromRecycle(button.dataset.restoreDeletedItem, button);
+  }));
   document.querySelectorAll('[data-restore]').forEach(button => button.addEventListener('click', async () => {
     const operationId = uid('restore');
     const result = restoreFromRecycleBin(ledger, button.dataset.restore, operationId);
@@ -1574,6 +1704,19 @@ $('#syncBadge').addEventListener('click', () => {
     showToast('本机模式不需要云端同步。');
     return;
   }
+  const state = syncCoordinator.getState();
+  if (state.status === 'synced' && !itemListenerError) {
+    if (hasOpenWalletDialog()) {
+      showToast('请先关闭正在使用的窗口，再刷新 App。');
+      return;
+    }
+    const refreshUrl = new URL(location.href);
+    refreshUrl.searchParams.set('wallet-refresh', String(Date.now()));
+    $('#syncBadge').textContent = '刷新中';
+    $('#syncBadge').disabled = true;
+    location.replace(refreshUrl.href);
+    return;
+  }
   itemListenerError = null;
   renderSyncStatus();
   syncCoordinator.requestRecovery('manual');
@@ -1591,6 +1734,7 @@ $('#payItemPartButton').addEventListener('click', () => openPaymentDialog(false)
 $('#editItemButton').addEventListener('click', openEditItem);
 $('#archiveItemButton').addEventListener('click', event => runItemLifecycle('archive', event.currentTarget));
 $('#restoreItemButton').addEventListener('click', event => runItemLifecycle('restore', event.currentTarget));
+$('#deleteItemButton').addEventListener('click', event => deleteSelectedItem(event.currentTarget));
 $('#closeReceiptViewerButton').addEventListener('click', closeReceiptViewer);
 $('#editItemCover').addEventListener('change', event => {
   if (event.target.files?.length) $('#editItemRemoveCover').checked = false;
