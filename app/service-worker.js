@@ -1,4 +1,4 @@
-const CACHE = 'family-wallet-v2-cloud-14';
+const CACHE = 'family-wallet-v2-cloud-15';
 const ASSETS = [
   './', './index.html', './styles.css', './main.js', './ledger.js', './items.js', './item-media.js', './items-view.js', './cloud-sync.js',
   './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
@@ -18,22 +18,29 @@ self.addEventListener('activate', event => event.waitUntil(
       .map(cacheName => caches.delete(cacheName))))
     .then(() => self.clients.claim())
     .then(() => self.clients.matchAll({ type:'window', includeUncontrolled:true }))
-    .then(windowClients => {
-      windowClients.forEach(client => {
-        const refreshUrl = new URL(client.url);
-        refreshUrl.searchParams.set('wallet-sw', CACHE);
-        client.navigate(refreshUrl.href).catch(() => {});
-      });
-    })
+    .then(windowClients => Promise.all(windowClients.map(client => client.postMessage({
+      type:'FAMILY_WALLET_UPDATE_READY',
+      cache:CACHE
+    }))))
 ));
 
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request)
+        .then(response => {
+          const copy = response.clone();
+          event.waitUntil(caches.open(CACHE).then(cache => cache.put('./index.html', copy)));
+          return response;
+        })
+        .catch(() => caches.match('./index.html'))
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request)
       .then(cached => cached || fetch(event.request))
-      .catch(() => event.request.mode === 'navigate'
-        ? caches.match('./index.html')
-        : Response.error())
+      .catch(() => Response.error())
   );
 });

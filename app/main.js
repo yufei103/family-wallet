@@ -1522,6 +1522,30 @@ function openRepaymentFromDetail(accountId, transactionId = null) {
   dismissDialog($('#accountDetailDialog'), () => openRepayment(accountId, transactionId, accountId));
 }
 
+let pendingWalletUpdateCache = null;
+const hadServiceWorkerControllerAtStartup = Boolean(navigator.serviceWorker?.controller);
+
+function hasOpenWalletDialog() {
+  return Boolean(document.querySelector('dialog[open]'));
+}
+
+function applyPendingWalletUpdate() {
+  if (!pendingWalletUpdateCache || hasOpenWalletDialog()) return;
+  const refreshUrl = new URL(location.href);
+  if (refreshUrl.searchParams.get('wallet-sw') === pendingWalletUpdateCache) {
+    pendingWalletUpdateCache = null;
+    return;
+  }
+  refreshUrl.searchParams.set('wallet-sw', pendingWalletUpdateCache);
+  location.replace(refreshUrl.href);
+}
+
+function handleWalletUpdateMessage(event) {
+  if (!hadServiceWorkerControllerAtStartup || event.data?.type !== 'FAMILY_WALLET_UPDATE_READY') return;
+  pendingWalletUpdateCache = String(event.data.cache || 'latest');
+  applyPendingWalletUpdate();
+}
+
 function requestDialogClose(dialog) {
   if (dialog?.id === 'itemDetailDialog') closeItemDetail();
   else if (dialog?.id === 'receiptViewerDialog') closeReceiptViewer();
@@ -1539,6 +1563,7 @@ document.querySelectorAll('dialog').forEach(dialog => {
     event.preventDefault();
     requestDialogClose(dialog);
   });
+  dialog.addEventListener('close', applyPendingWalletUpdate);
 });
 $('#moreButton').addEventListener('click', () => {
   $('#settingsMessage').textContent = '';
@@ -2283,6 +2308,7 @@ document.addEventListener('visibilitychange', () => {
 
 applyTheme(localStorage.getItem(THEME_STORE) || document.documentElement.dataset.theme || 'teal', { persist:false });
 if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', handleWalletUpdateMessage);
   navigator.serviceWorker.register('./service-worker.js', { updateViaCache:'none' })
     .then(registration => registration.update())
     .catch(() => {});
