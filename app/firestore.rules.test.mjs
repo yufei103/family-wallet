@@ -14,6 +14,16 @@ const T2 = '2026-08-22T02:00:00.000Z';
 const JPEG = 'data:image/jpeg;base64,/9j/2Q==';
 let env;
 
+const legacyAccountRecord = (id, name, overrides = {}) => ({
+  id, householdId, name, kind: 'asset', openingBalanceMinor: 0,
+  includeInTotal: true, photoDataUrl: null, archivedAt: null, ...overrides
+});
+const completeAccountRecord = (id, name, overrides = {}) => ({
+  ...legacyAccountRecord(id, name), subtype: 'asset', creditLimitMinor: null,
+  statementDay: null, dueDay: null, loanType: null, originalPrincipalMinor: null,
+  scheduledPaymentMinor: null, expectedPayoffDate: null, ...overrides
+});
+
 const authDb = (uid, email) => env.authenticatedContext(uid, { email }).firestore();
 const memberRecord = (uid, email, role) => ({ uid, email, displayName: uid, role, active: true, joinedAt: T0 });
 const itemRecord = (id, overrides = {}) => ({
@@ -143,10 +153,10 @@ beforeEach(async () => {
     uid: 'owner-a', email: ownerEmail, displayName: 'Owner', householdIds: [householdId], selectedHouseholdId: householdId, createdAt: T0
   }));
   await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'accounts', 'mbb'), {
-    id: 'mbb', householdId, name: 'Maybank', kind: 'asset', openingBalanceMinor: 500000
+    ...legacyAccountRecord('mbb', 'Maybank', { openingBalanceMinor: 500000 })
   }));
   await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'accounts', 'cash'), {
-    id: 'cash', householdId, name: 'Cash', kind: 'asset', openingBalanceMinor: 10000
+    ...legacyAccountRecord('cash', 'Cash', { openingBalanceMinor: 10000 })
   }));
   await assertSucceeds(setDoc(doc(owner, 'invites', memberEmail), {
     email: memberEmail, householdId, householdName: '家庭账本', ownerUid: 'owner-a', status: 'pending',
@@ -369,7 +379,7 @@ test('浏览器客户端保持付款账户、编辑幂等载荷与缺失账本�
 
   const editSource = source.slice(source.indexOf('async function editItem'), source.indexOf('async function mutateArchive'));
   assert.match(editSource, /const requestedBusinessPayload = \{/);
-  assert.match(editSource, /sameFields\(item, requestedBusinessPayload, \['name', 'note', 'fullPriceMinor', 'status', 'coverMediaId'\]\)/);
+  assert.match(editSource, /sameFields\(item, requestedBusinessPayload, \['name', 'note', 'fullPriceMinor', 'etaDate', 'status', 'coverMediaId'\]\)/);
   assert.match(editSource, /operationId 已用于不同编辑载荷/);
   assert.ok(editSource.indexOf('item.lastOperationId === operationId') < editSource.indexOf('assertRevision(item, input.expectedRevision)'));
   assert.ok(editSource.indexOf('operationId 已用于不同编辑载荷') < editSource.indexOf('新封面引用必须随 coverMedia 一起写入'));
@@ -492,4 +502,71 @@ test('普通账目仍可创建编辑，但不能后补伪造 itemPayment 来源'
   await assertSucceeds(setDoc(ref, ordinary));
   await assertSucceeds(updateDoc(ref, { note: 'edited', lastOperationId: 'ordinary-edit' }));
   await assertFails(updateDoc(ref, { sourceType: 'itemPayment', sourceItemId: 'bike', sourcePaymentId: 'fake' }));
+});
+
+test('旧版 production 的精确 account/item/ordinary transaction 写入继续可用', async () => {
+  const owner = authDb('owner-a', ownerEmail);
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'accounts', 'legacy-extra'),
+    legacyAccountRecord('legacy-extra', '旧版账户')));
+  const legacyItem = await createPlainItem(owner, 'legacy-production-item');
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'items', legacyItem.id), {
+    ...legacyItem, note: '旧版编辑', updatedAt: T1, revision: 2, lastOperationId: 'legacy-item-edit'
+  }));
+  const legacyTx = {
+    id: 'legacy-production-tx', householdId, operationId: 'legacy-production-tx', actorUid: 'owner-a',
+    kind: 'expense', accountId: 'mbb', targetAccountId: null, amountMinor: 100, category: null, note: '',
+    occurredAt: T1, createdAt: T1, deletedAt: null, purgedAt: null, lastOperationId: 'legacy-production-tx'
+  };
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'transactions', legacyTx.id), legacyTx));
+});
+
+test('新版信用卡消费与还款合法，拆分错误和贷款消费拒绝', async () => {
+  const owner = authDb('owner-a', ownerEmail);
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'accounts', 'visa'), completeAccountRecord('visa', 'Visa', {
+    kind: 'liability', subtype: 'credit_card', openingBalanceMinor: 5000,
+    creditLimitMinor: 100000, statementDay: 5, dueDay: 25
+  })));
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'accounts', 'loan'), completeAccountRecord('loan', '车贷', {
+    kind: 'liability', subtype: 'loan', openingBalanceMinor: 50000, loanType: 'car',
+    originalPrincipalMinor: 50000, scheduledPaymentMinor: 1000, expectedPayoffDate: '2030-02-28'
+  })));
+  const tx = (id, overrides) => ({
+    id, householdId, operationId: id, actorUid: 'owner-a', kind: 'expense', accountId: 'visa',
+    targetAccountId: null, amountMinor: 1000, principalMinor: null, interestMinor: null,
+    category: null, note: '', occurredAt: T1, createdAt: T1, deletedAt: null, purgedAt: null,
+    lastOperationId: id, ...overrides
+  });
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'transactions', 'card-expense'), tx('card-expense')));
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'transactions', 'card-repay'), tx('card-repay', {
+    kind: 'repayment', accountId: 'mbb', targetAccountId: 'visa', principalMinor: 1000, interestMinor: 0
+  })));
+  await assertFails(setDoc(doc(owner, 'households', householdId, 'transactions', 'bad-repay'), tx('bad-repay', {
+    kind: 'repayment', accountId: null, targetAccountId: 'visa', principalMinor: 900, interestMinor: 100
+  })));
+  await assertFails(setDoc(doc(owner, 'households', householdId, 'transactions', 'loan-expense'), tx('loan-expense', {
+    accountId: 'loan'
+  })));
+});
+
+test('ETA 支持旧版缺失、新版日期/null 与元数据编辑，并拒绝伪日期', async () => {
+  const owner = authDb('owner-a', ownerEmail);
+  await createPlainItem(owner, 'eta-legacy');
+  const dated = await createPlainItem(owner, 'eta-dated', { etaDate: '2028-02-29' });
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'items', dated.id), {
+    ...dated, etaDate: null, updatedAt: T1, revision: 2, lastOperationId: 'eta-null'
+  }));
+  await assertFails(setDoc(doc(owner, 'households', householdId, 'items', 'eta-invalid'),
+    itemRecord('eta-invalid', { etaDate: '2027-02-29' })));
+});
+
+test('浏览器 persistence 包含账户子类型字段、还款拆分和 ETA', async () => {
+  const source = await readFile('app/firebase-client.js', 'utf8');
+  const accountSource = source.slice(source.indexOf('const accountRecord'), source.indexOf('const transactionRecord'));
+  for (const field of ['subtype', 'creditLimitMinor', 'statementDay', 'dueDay', 'loanType', 'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate', 'photoDataUrl']) {
+    assert.match(accountSource, new RegExp(`${field}:`));
+  }
+  const txSource = source.slice(source.indexOf('const transactionRecord'), source.indexOf('export async function createFirebaseWallet'));
+  assert.match(txSource, /principalMinor:\s*entry\.principalMinor \?\? null/);
+  assert.match(txSource, /interestMinor:\s*entry\.interestMinor \?\? null/);
+  assert.match(source, /etaDate:\s*changes\.etaDate === undefined/);
 });

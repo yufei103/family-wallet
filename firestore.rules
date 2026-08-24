@@ -45,6 +45,59 @@ service cloud.firestore {
     function optionalString(value, cap) { return value == null || (value is string && value.size() <= cap); }
     function safePositiveMoney(value) { return value is int && value > 0 && value <= 9007199254740991; }
     function safeNonNegativeMoney(value) { return value is int && value >= 0 && value <= 9007199254740991; }
+    function safeMoney(value) { return value is int && value >= -9007199254740991 && value <= 9007199254740991; }
+    function validCalendarDate(value) {
+      return value is string && value.matches(
+        '^([0-9]{4}-((0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29)$'
+      );
+    }
+    function optionalCalendarDate(value) { return value == null || validCalendarDate(value); }
+    function validAccountKeys(data) {
+      let legacy = [
+        'id', 'householdId', 'name', 'kind', 'openingBalanceMinor', 'includeInTotal', 'photoDataUrl', 'archivedAt'
+      ];
+      let complete = [
+        'id', 'householdId', 'name', 'kind', 'subtype', 'openingBalanceMinor', 'includeInTotal',
+        'photoDataUrl', 'archivedAt', 'creditLimitMinor', 'statementDay', 'dueDay', 'loanType',
+        'originalPrincipalMinor', 'scheduledPaymentMinor', 'expectedPayoffDate'
+      ];
+      return (data.keys().hasAll(legacy) && data.keys().hasOnly(legacy))
+        || (data.keys().hasAll(complete) && data.keys().hasOnly(complete));
+    }
+    function completeAccount(data) { return data.keys().hasAny(['subtype']); }
+    function validAccountSubtype(data) {
+      return !completeAccount(data) || (
+        data.subtype in ['asset', 'credit_card', 'loan', 'generic_liability']
+        && ((data.kind == 'asset' && data.subtype == 'asset')
+          || (data.kind == 'liability' && data.subtype in ['credit_card', 'loan', 'generic_liability']))
+        && (data.subtype == 'credit_card'
+          ? ((data.creditLimitMinor == null || safePositiveMoney(data.creditLimitMinor))
+            && (data.statementDay == null || (data.statementDay is int && data.statementDay >= 1 && data.statementDay <= 31))
+            && (data.dueDay == null || (data.dueDay is int && data.dueDay >= 1 && data.dueDay <= 31)))
+          : (data.creditLimitMinor == null && data.statementDay == null && data.dueDay == null))
+        && (data.subtype == 'loan'
+          ? ((data.loanType == null || data.loanType in ['car', 'home', 'other'])
+            && (data.originalPrincipalMinor == null || safePositiveMoney(data.originalPrincipalMinor))
+            && (data.scheduledPaymentMinor == null || safePositiveMoney(data.scheduledPaymentMinor))
+            && optionalCalendarDate(data.expectedPayoffDate))
+          : (data.loanType == null && data.originalPrincipalMinor == null
+            && data.scheduledPaymentMinor == null && data.expectedPayoffDate == null))
+      );
+    }
+    function validAccountShape(data, householdId, accountId) {
+      return validAccountKeys(data)
+        && data.id == accountId && data.householdId == householdId
+        && nonEmpty(data.name, 200)
+        && data.kind in ['asset', 'liability']
+        && safeMoney(data.openingBalanceMinor)
+        && (data.kind != 'liability' || data.openingBalanceMinor >= 0)
+        && data.includeInTotal is bool
+        && (data.photoDataUrl == null || (data.photoDataUrl is string
+          && data.photoDataUrl.matches('^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$')
+          && data.photoDataUrl.size() <= 300000))
+        && (data.archivedAt == null || nonEmpty(data.archivedAt, 100))
+        && validAccountSubtype(data);
+    }
     function validItemShape(data, householdId, itemId) {
       return data.keys().hasAll([
           'id', 'householdId', 'name', 'note', 'fullPriceMinor', 'paidMinor', 'status', 'coverMediaId',
@@ -54,7 +107,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'householdId', 'name', 'note', 'fullPriceMinor', 'paidMinor', 'status', 'coverMediaId',
           'createdByUid', 'createdAt', 'updatedByUid', 'updatedAt', 'archivedAt', 'revision',
-          'lastOperationId', 'lastPaymentId'
+          'lastOperationId', 'lastPaymentId', 'etaDate'
         ])
         && data.id == itemId
         && data.householdId == householdId
@@ -73,6 +126,7 @@ service cloud.firestore {
         && data.revision is int && data.revision >= 1
         && nonEmpty(data.lastOperationId, 200)
         && (data.lastPaymentId == null || nonEmpty(data.lastPaymentId, 200))
+        && (!data.keys().hasAny(['etaDate']) || optionalCalendarDate(data.etaDate))
         && ((data.status == 'archived') == (data.archivedAt != null))
         && (data.status != 'completed' || data.paidMinor == data.fullPriceMinor)
         && (data.status != 'active' || data.paidMinor < data.fullPriceMinor);
@@ -113,6 +167,11 @@ service cloud.firestore {
         && after.createdByUid == before.createdByUid
         && after.createdAt == before.createdAt;
     }
+    function etaPreserved(after, before) {
+      return before.keys().hasAny(['etaDate'])
+        ? (after.keys().hasAny(['etaDate']) && after.etaDate == before.etaDate)
+        : !after.keys().hasAny(['etaDate']);
+    }
     function itemPaymentMutation(after, before, householdId) {
       let paymentId = after.lastPaymentId;
       return paymentId != null
@@ -122,6 +181,7 @@ service cloud.firestore {
         && before.archivedAt == null && after.archivedAt == null
         && after.fullPriceMinor == before.fullPriceMinor
         && after.name == before.name && after.note == before.note && after.coverMediaId == before.coverMediaId
+        && etaPreserved(after, before)
         && existsAfter(paymentPath(householdId, paymentId))
         && getAfter(paymentPath(householdId, paymentId)).data.itemId == after.id
         && getAfter(paymentPath(householdId, paymentId)).data.lastOperationId == after.lastOperationId
@@ -149,7 +209,7 @@ service cloud.firestore {
     }
     function itemMetadataMutation(after, before, householdId) {
       return after.diff(before).affectedKeys().hasOnly([
-          'name', 'note', 'fullPriceMinor', 'status', 'coverMediaId', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId'
+          'name', 'note', 'fullPriceMinor', 'etaDate', 'status', 'coverMediaId', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId'
         ])
         && after.paidMinor == before.paidMinor
         && after.lastPaymentId == before.lastPaymentId
@@ -159,11 +219,12 @@ service cloud.firestore {
     }
     function itemArchiveMutation(after, before) {
       return after.diff(before).affectedKeys().hasOnly([
-          'status', 'archivedAt', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId'
+          'status', 'archivedAt', 'etaDate', 'updatedByUid', 'updatedAt', 'revision', 'lastOperationId'
         ])
         && after.name == before.name && after.note == before.note
         && after.fullPriceMinor == before.fullPriceMinor && after.paidMinor == before.paidMinor
         && after.coverMediaId == before.coverMediaId && after.lastPaymentId == before.lastPaymentId
+        && etaPreserved(after, before)
         && (
           (before.archivedAt == null && before.status == 'completed'
             && before.paidMinor == before.fullPriceMinor
@@ -292,32 +353,86 @@ service cloud.firestore {
             && getAfter(paymentPath(householdId, data.paymentId)).data.receiptMediaId == mediaId));
     }
     function transactionKeysValid(data) {
-      return data.keys().hasAll([
-          'id', 'householdId', 'operationId', 'actorUid', 'kind', 'accountId', 'targetAccountId',
-          'amountMinor', 'category', 'note', 'occurredAt', 'createdAt', 'deletedAt', 'purgedAt', 'lastOperationId'
-        ])
-        && data.keys().hasOnly([
-          'id', 'householdId', 'operationId', 'actorUid', 'kind', 'accountId', 'targetAccountId',
-          'amountMinor', 'category', 'note', 'occurredAt', 'createdAt', 'deletedAt', 'purgedAt', 'lastOperationId',
-          'sourceType', 'sourceItemId', 'sourcePaymentId'
-        ]);
+      let core = [
+        'id', 'householdId', 'operationId', 'actorUid', 'kind', 'accountId', 'targetAccountId',
+        'amountMinor', 'category', 'note', 'occurredAt', 'createdAt', 'deletedAt', 'purgedAt', 'lastOperationId'
+      ];
+      let allowed = [
+        'id', 'householdId', 'operationId', 'actorUid', 'kind', 'accountId', 'targetAccountId',
+        'amountMinor', 'principalMinor', 'interestMinor', 'category', 'note', 'occurredAt', 'createdAt',
+        'deletedAt', 'purgedAt', 'lastOperationId', 'sourceType', 'sourceItemId', 'sourcePaymentId'
+      ];
+      return data.keys().hasAll(core) && data.keys().hasOnly(allowed)
+        && (data.keys().hasAll(['principalMinor', 'interestMinor'])
+          || !data.keys().hasAny(['principalMinor', 'interestMinor']))
+        && (data.keys().hasAll(['sourceType', 'sourceItemId', 'sourcePaymentId'])
+          || !data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId']));
+    }
+    function storedAccountSubtype(householdId, accountId) {
+      let data = get(accountPath(householdId, accountId)).data;
+      return data.keys().hasAny(['subtype'])
+        ? data.subtype
+        : (data.kind == 'asset' ? 'asset' : 'generic_liability');
+    }
+    function ordinaryPartsNull(data) {
+      return !data.keys().hasAny(['principalMinor', 'interestMinor'])
+        || (data.principalMinor == null && data.interestMinor == null);
+    }
+    function validTransactionAccounts(data, householdId) {
+      return data.kind == 'repayment'
+        ? (nonEmpty(data.targetAccountId, 200)
+          && exists(accountPath(householdId, data.targetAccountId))
+          && get(accountPath(householdId, data.targetAccountId)).data.kind == 'liability'
+          && (data.accountId == null || (nonEmpty(data.accountId, 200)
+            && exists(accountPath(householdId, data.accountId))
+            && get(accountPath(householdId, data.accountId)).data.kind == 'asset')))
+        : (nonEmpty(data.accountId, 200)
+          && exists(accountPath(householdId, data.accountId))
+          && (data.kind == 'income'
+            ? (data.targetAccountId == null && get(accountPath(householdId, data.accountId)).data.kind == 'asset')
+            : data.kind == 'expense'
+              ? (data.targetAccountId == null
+                && (get(accountPath(householdId, data.accountId)).data.kind == 'asset'
+                  || (get(accountPath(householdId, data.accountId)).data.kind == 'liability'
+                    && storedAccountSubtype(householdId, data.accountId) != 'loan')))
+              : (nonEmpty(data.targetAccountId, 200)
+                && data.targetAccountId != data.accountId
+                && exists(accountPath(householdId, data.targetAccountId))
+                && get(accountPath(householdId, data.accountId)).data.kind == 'asset'
+                && get(accountPath(householdId, data.targetAccountId)).data.kind == 'asset')));
+    }
+    function validTransactionKind(data, householdId) {
+      return data.kind == 'repayment'
+        ? (data.keys().hasAll(['principalMinor', 'interestMinor'])
+          && !data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId'])
+          && safePositiveMoney(data.principalMinor)
+          && safeNonNegativeMoney(data.interestMinor)
+          && data.amountMinor == data.principalMinor + data.interestMinor
+          && (storedAccountSubtype(householdId, data.targetAccountId) == 'loan'
+            || (data.principalMinor == data.amountMinor && data.interestMinor == 0)))
+        : ordinaryPartsNull(data);
     }
     function validTransactionShape(data, householdId, transactionId) {
       return transactionKeysValid(data)
         && data.id == transactionId && data.householdId == householdId
         && nonEmpty(data.operationId, 200) && nonEmpty(data.actorUid, 200)
-        && data.kind in ['income', 'expense', 'transfer']
-        && nonEmpty(data.accountId, 200)
-        && exists(accountPath(householdId, data.accountId))
-        && (data.kind == 'transfer' ? nonEmpty(data.targetAccountId, 200) : data.targetAccountId == null)
+        && data.kind in ['income', 'expense', 'transfer', 'repayment']
         && safePositiveMoney(data.amountMinor)
         && optionalString(data.category, 200) && optionalString(data.note, 2000)
         && nonEmpty(data.occurredAt, 100) && nonEmpty(data.createdAt, 100)
         && (data.deletedAt == null || nonEmpty(data.deletedAt, 100))
         && (data.purgedAt == null || nonEmpty(data.purgedAt, 100))
-        && nonEmpty(data.lastOperationId, 200);
+        && nonEmpty(data.lastOperationId, 200)
+        && validTransactionAccounts(data, householdId)
+        && validTransactionKind(data, householdId);
     }
     function isLinkedTransaction(data) { return data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId']); }
+    function repaymentIdentityPreserved(after, before) {
+      return after.kind == 'repayment'
+        && after.accountId == before.accountId && after.targetAccountId == before.targetAccountId
+        && after.amountMinor == before.amountMinor && after.principalMinor == before.principalMinor
+        && after.interestMinor == before.interestMinor;
+    }
     function validLinkedTransaction(data, householdId, transactionId) {
       let paymentId = data.sourcePaymentId;
       return data.keys().hasAll(['sourceType', 'sourceItemId', 'sourcePaymentId'])
@@ -401,8 +516,12 @@ service cloud.firestore {
 
       match /accounts/{accountId} {
         allow read: if isMember(householdId);
-        allow create: if isMember(householdId) && request.resource.data.householdId == householdId;
-        allow update: if isMember(householdId) && request.resource.data.householdId == resource.data.householdId;
+        allow create: if isMember(householdId)
+          && validAccountShape(request.resource.data, householdId, accountId);
+        allow update: if isMember(householdId)
+          && validAccountShape(request.resource.data, householdId, accountId)
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.householdId == resource.data.householdId;
         allow delete: if false;
       }
 
@@ -439,12 +558,17 @@ service cloud.firestore {
             : !request.resource.data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId']));
         allow update: if isMember(householdId)
           && validTransactionShape(request.resource.data, householdId, transactionId)
+          && request.resource.data.id == resource.data.id
           && request.resource.data.householdId == resource.data.householdId
           && request.resource.data.actorUid == resource.data.actorUid
+          && request.resource.data.operationId == resource.data.operationId
           && (isLinkedTransaction(resource.data)
             ? (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'lastOperationId'])
               && validLinkedTransaction(request.resource.data, householdId, transactionId))
-            : (!isLinkedTransaction(request.resource.data)));
+            : (!isLinkedTransaction(request.resource.data)
+              && (resource.data.kind == 'repayment'
+                ? repaymentIdentityPreserved(request.resource.data, resource.data)
+                : request.resource.data.kind != 'repayment')));
         allow delete: if false;
       }
     }

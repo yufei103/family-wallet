@@ -8,13 +8,18 @@ A mobile-first household finance PWA for recording income, expenses, transfers a
 - Personal and shared household ledgers
 - Gmail invitation flow for family members
 - Income, expense and atomic account-to-account transfers
+- Explicit account types for available funds, credit cards and loans; legacy accounts remain readable
+- Credit-card spending is counted once, while repayments reduce cash and debt without creating a second expense
+- Loan repayments split principal from interest/fees, so only interest/fees enter monthly spending
+- Partial, full and off-ledger repayments; recorded repayments are corrected through recycle-and-recreate rather than silent overwrite
 - One-tap icon categories with an Other/custom option
-- Monthly summaries, account detail and newest-first activity
+- Monthly summaries, household assets/liabilities/net total, a true-spending donut and upcoming payment/ETA actions
+- Responsive account detail and newest-first activity
 - Responsive account-detail pagination (6 per phone page, 10 on larger screens)
 - Account photos compressed in the browser
-- A shared item cabinet for deposits, installments, receipts, balances and manual archive
+- A shared item cabinet for optional ETA, deposits, installments, receipts, balances and manual archive
 - Item payments can atomically create a linked shopping expense or stay independent from the ledger
-- Separate, on-demand compressed item covers and receipt documents; image bytes never enter realtime item/payment listeners
+- Separate, on-demand compressed item covers and receipt documents; receipts open in a bounded standalone viewer and image bytes never enter realtime item/payment listeners
 - Installable Web/iPhone icon assets without the source canvas border
 - Offline PWA shell, local Firestore cache and truthful cached/pending/offline/recovering sync states
 - Recycle bin, restore, reconciliation and metadata-only JSON export from the low-frequency settings menu

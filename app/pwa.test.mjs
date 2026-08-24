@@ -35,19 +35,20 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
     assert.match(html, new RegExp(`data-view-target="${view}"`));
   }
   assert.match(html, /id="categoryInsightList"/);
-  assert.match(html, /id="recentTransactionList"/);
+  assert.match(html, /id="categoryDonut"/);
+  assert.match(html, /id="upcomingActionList"/);
+  assert.doesNotMatch(html, /id="recentTransactionList"/);
   assert.match(main, /function setView\(view,/);
   assert.match(main, /function spendingCategories\(entries\)/);
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-10/);
+  assert.match(worker, /family-wallet-v2-cloud-11/);
 });
 
 test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {
   const [main, styles] = await Promise.all([readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
   assert.match(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*center/);
-  assert.match(styles, /\.sheet>form,\.sheet>div\s*\{[^}]*border-radius:\s*24px[^}]*box-shadow:/s);
   assert.doesNotMatch(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*flex-end/);
   assert.match(styles, /@keyframes modal-enter/);
   assert.match(styles, /@keyframes modal-exit/);
@@ -102,10 +103,11 @@ test('账目显示账户流向，账户点击先打开当月明细再进入编�
   assert.match(main, /entry\.accountId === account\.id \|\| entry\.targetAccountId === account\.id/);
 });
 
-test('账户明细、全部账目和首页最近账目共用日期与新增时间排序', async () => {
+test('账户明细与全部账目共用日期和新增时间排序，首页不再复制交易列表', async () => {
   const main = await readFile(app('./main.js'), 'utf8');
   assert.match(main, /compareEntriesNewestFirst/);
-  assert.equal((main.match(/\.sort\(compareEntriesNewestFirst\)/g) || []).length, 3);
+  assert.equal((main.match(/\.sort\(compareEntriesNewestFirst\)/g) || []).length, 2);
+  assert.doesNotMatch(main, /recentTransactionList/);
   assert.doesNotMatch(main, /\.sort\(\(a, b\) => b\.occurredAt\.localeCompare\(a\.occurredAt\)\)/);
 });
 
@@ -275,4 +277,68 @@ test('GitHub Pages 流程先跑测试、Rules Emulator 和 Build，再发布静�
   for (const runtime of ['items.js', 'item-media.js', 'items-view.js', 'cloud-sync.js']) assert.match(build, new RegExp(runtime.replace('.', '\\.')));
   assert.doesNotMatch(build, /cp\(source, output/);
   assert.doesNotMatch(build, /emulator-login\.html|\.test\.mjs/);
+});
+
+test('付款凭证使用独立按需 viewer，并提供关闭与下载', async () => {
+  const [html, main] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8')]);
+  for (const id of ['receiptViewerDialog', 'receiptViewerImage', 'receiptViewerMeta', 'saveReceiptButton']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(main, /loadMediaOnce\(currentMediaHouseholdId\(\), payment\.receiptMediaId\)/);
+  assert.match(main, /saveLink\.download = `family-wallet-/);
+  assert.match(main, /closeReceiptViewerButton'\)\.addEventListener\('click', closeReceiptViewer\)/);
+  assert.doesNotMatch(main, /receiptPreview|closeReceiptButton/);
+});
+
+test('物品 ETA 在本机与云端新增、编辑及详情路径完整传递', async () => {
+  const main = await readFile(app('./main.js'), 'utf8');
+  assert.match(main, /etaDate:\$\('#newItemEtaDate'\)\.value \|\| null/);
+  assert.match(main, /\$\('#editItemEtaDate'\)\.value = item\.etaDate \|\| ''/);
+  assert.match(main, /etaDate:\$\('#editItemEtaDate'\)\.value \|\| null/);
+  assert.match(main, /describeEtaDate\(item\.etaDate, today\(\)\)/);
+});
+
+test('账户子类型驱动选择范围、分组、详情指标与保存元数据', async () => {
+  const main = await readFile(app('./main.js'), 'utf8');
+  assert.match(main, /function entryAccounts\(kind\)/);
+  assert.match(main, /\['asset', 'credit_card', 'generic_liability'\]/);
+  assert.match(main, /function itemPaymentAccounts\(\)/);
+  assert.match(main, /function renderAccountGroups\(accounts\)/);
+  assert.match(main, /remainingPayoffMonths\(account\)/);
+  assert.match(main, /const kind = subtype === 'asset' \? 'asset' : 'liability'/);
+  assert.doesNotMatch(main, /name="accountKind"/);
+});
+
+test('还款使用单一 ledger operation 与正常 transaction 同步路径', async () => {
+  const main = await readFile(app('./main.js'), 'utf8');
+  assert.match(main, /function openRepayment\(accountId, transactionId = null\)/);
+  assert.match(main, /kind:'repayment'/);
+  assert.match(main, /amountMinor:principalMinor \+ interestMinor/);
+  assert.match(main, /applyLedgerOperation\(ledger, \{ id:pendingRepayment\.operationId, \.\.\.changes \}\)/);
+  assert.match(main, /saveTransactionRecord\(next, transactionId\)/);
+  assert.match(main, /moveToRecycleBin\(ledger, pendingRepayment\.transactionId/);
+  assert.match(main, /既有还款不能直接覆写，请移入回收站后重新记录/);
+  assert.match(main, /saveRepaymentButton'\)\.hidden = reviewing/);
+  assert.match(main, /form\.querySelectorAll\('input, select'\).*control\.disabled = true/s);
+});
+
+test('概览圆环统计真实消费并呈现近期负债与 ETA 事项', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'),
+    readFile(app('./main.js'), 'utf8'),
+    readFile(app('./styles.css'), 'utf8')
+  ]);
+  assert.match(main, /entry\.kind === 'repayment'.*entry\.interestMinor/s);
+  assert.match(main, /category = '贷款利息与费用'/);
+  assert.match(main, /sorted\.slice\(0, 4\)/);
+  assert.match(main, /donut\.style\.background = `conic-gradient/);
+  assert.match(main, /renderCategoryOverview\(entries\);\s*renderItemsView\(\);\s*renderUpcomingActions\(\);/);
+  assert.match(main, /subtype === 'credit_card'.*account\.dueDay/s);
+  assert.match(main, /subtype === 'loan'.*account\.scheduledPaymentMinor/s);
+  assert.match(main, /item\.etaDate.*data-upcoming-type/s);
+  assert.match(main, /class="account-groups"/);
+  assert.match(main, /class="account-group-heading"/);
+  assert.match(html, /id="categoryDonutTotal"/);
+  assert.match(html, /id="upcomingActionList"/);
+  assert.doesNotMatch(html, /recentTransactionList/);
+  assert.match(styles, /\.category-donut\s*\{/);
+  assert.match(styles, /\.upcoming-action-row\s*\{/);
 });

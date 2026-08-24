@@ -1,5 +1,5 @@
 import { createLedger, serialiseLedger } from './ledger.js';
-import { createItemsState, deriveItems, serialiseItemsState } from './items.js';
+import { createItemsState, deriveItems, normaliseEtaDate, serialiseItemsState } from './items.js';
 
 export const LOCAL_SCHEMA_VERSION = 2;
 
@@ -7,6 +7,22 @@ const clone = value => value == null ? value : structuredClone(value);
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({
   '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;'
 })[char]);
+
+const localTodayDate = () => {
+  const now = new Date();
+  return `${String(now.getFullYear()).padStart(4, '0')}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+};
+
+export function describeEtaDate(etaDate, todayDate) {
+  const eta = normaliseEtaDate(etaDate);
+  if (!eta) return '';
+  const today = normaliseEtaDate(todayDate);
+  if (!today) throw new Error('今天日期必须是有效的 YYYY-MM-DD');
+  const [, , month, day] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(eta).map(Number);
+  const calendarDay = `${month}月${day}日`;
+  if (eta === today) return '预计今天到货';
+  return eta > today ? `预计 ${calendarDay}到货` : `原预计 ${calendarDay}`;
+}
 
 /** Read schema v2, while treating the old bare ledger payload as a legacy fallback. */
 export function hydrateLocalEnvelope(raw, fallbackLedger) {
@@ -79,7 +95,7 @@ export function displayItemsFromLocal(itemsState) {
   return deriveItems(itemsState).map(normaliseDisplayItem);
 }
 
-export function renderItemCards(items, { formatMoney, mediaCache = new Map(), householdId = 'local' } = {}) {
+export function renderItemCards(items, { formatMoney, mediaCache = new Map(), householdId = 'local', todayDate = localTodayDate() } = {}) {
   if (!items.length) {
     return '<div class="items-empty"><b>橱窗还是空的</b><p>把想收藏、正在分期或已经拥有的物品放进来。</p><button class="secondary-button" type="button" data-new-item>新增物品</button></div>';
   }
@@ -93,7 +109,11 @@ export function renderItemCards(items, { formatMoney, mediaCache = new Map(), ho
     const paid = formatMoney(item.paidMinor);
     const full = formatMoney(item.fullPriceMinor);
     const balance = formatMoney(item.balanceMinor);
-    return `<button class="item-card" type="button" data-item-id="${escapeHtml(item.id)}" aria-label="查看 ${escapeHtml(item.name)}"><span class="item-cover">${coverMarkup}</span><span class="item-card-copy"><b>${escapeHtml(item.name)}</b><small>已付 ${paid} / ${full}</small><span class="item-progress" aria-label="已完成 ${item.progress}%"><i style="width:${item.progress}%"></i></span><span class="item-card-foot"><span>余额 ${balance}</span><em class="item-status ${item.status}">${item.status === 'completed' ? '已付清' : item.status === 'archived' ? '已归档' : '待付'}</em></span></span></button>`;
+    const etaDescription = item.etaDate ? describeEtaDate(item.etaDate, todayDate) : '';
+    const statusText = item.status === 'completed' ? '已付清' : item.status === 'archived' ? '已归档' : `待付 ${balance}`;
+    const etaMarkup = etaDescription ? `<small class="item-eta">${escapeHtml(etaDescription)}</small>` : '';
+    const accessibleLabel = `查看 ${item.name}，${statusText}${etaDescription ? `，${etaDescription}` : ''}`;
+    return `<button class="item-card" type="button" data-item-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(accessibleLabel)}"><span class="item-cover">${coverMarkup}</span><span class="item-card-copy"><b>${escapeHtml(item.name)}</b><small>已付 ${escapeHtml(paid)} / ${escapeHtml(full)}</small>${etaMarkup}<span class="item-progress" aria-label="已完成 ${item.progress}%"><i style="width:${item.progress}%"></i></span><span class="item-card-foot"><span>余额 ${escapeHtml(balance)}</span><em class="item-status ${item.status}" data-item-status="${item.status}">${escapeHtml(statusText)}</em></span></span></button>`;
   }).join('');
 }
 

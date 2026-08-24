@@ -14,16 +14,36 @@ const now = () => new Date().toISOString();
 const cleanEmail = email => String(email ?? '').trim().toLowerCase();
 const cleanRecord = value => JSON.parse(JSON.stringify(value));
 const personalHouseholdId = uid => `personal-${uid}`;
+const normaliseCalendarDate = (value, label = '日期') => {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value).trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!match) throw new Error(`${label}无效`);
+  const [year, month, day] = match.slice(1).map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) {
+    throw new Error(`${label}无效`);
+  }
+  return text;
+};
 
 const accountRecord = (account, householdId) => cleanRecord({
   id: account.id,
   householdId,
   name: account.name,
   kind: account.kind,
+  subtype: account.subtype ?? (account.kind === 'liability' ? 'generic_liability' : 'asset'),
   openingBalanceMinor: account.openingBalanceMinor ?? 0,
   includeInTotal: account.includeInTotal !== false,
   photoDataUrl: account.photoDataUrl ?? null,
-  archivedAt: account.archivedAt ?? null
+  archivedAt: account.archivedAt ?? null,
+  creditLimitMinor: account.creditLimitMinor ?? null,
+  statementDay: account.statementDay ?? null,
+  dueDay: account.dueDay ?? null,
+  loanType: account.loanType ?? null,
+  originalPrincipalMinor: account.originalPrincipalMinor ?? null,
+  scheduledPaymentMinor: account.scheduledPaymentMinor ?? null,
+  expectedPayoffDate: normaliseCalendarDate(account.expectedPayoffDate, '预计还清日期')
 });
 
 const transactionRecord = (entry, householdId, actorUid) => {
@@ -36,6 +56,8 @@ const transactionRecord = (entry, householdId, actorUid) => {
   accountId: entry.accountId,
   targetAccountId: entry.targetAccountId ?? null,
   amountMinor: entry.amountMinor,
+  principalMinor: entry.principalMinor ?? null,
+  interestMinor: entry.interestMinor ?? null,
   category: entry.category ?? null,
   note: entry.note ?? '',
   occurredAt: entry.occurredAt,
@@ -287,6 +309,8 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
       accountId: payment.accountId,
       targetAccountId: null,
       amountMinor: payment.amountMinor,
+      principalMinor: null,
+      interestMinor: null,
       category: '购物',
       note: payment.note,
       occurredAt: payment.occurredAt,
@@ -339,6 +363,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     const fullPriceMinor = positiveMinor(input.fullPriceMinor, '物品全价');
     const name = String(input.name ?? '').trim();
     if (!name) throw new Error('物品名称必填');
+    const etaDate = normaliseCalendarDate(input.etaDate, '预计到达日期');
     const createdAt = input.createdAt ?? now();
     const cover = mediaRecord(input.coverMedia, { householdId, itemId: id, kind: 'cover', actorUid, createdAt });
     const depositInput = input.deposit && input.deposit.amountMinor !== 0 ? input.deposit : null;
@@ -353,6 +378,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     }) : null;
     const item = {
       id, householdId, name, note: String(input.note ?? ''), fullPriceMinor,
+      etaDate,
       paidMinor: payment?.amountMinor ?? 0,
       status: payment?.amountMinor === fullPriceMinor ? 'completed' : 'active',
       coverMediaId: cover?.id ?? input.coverMediaId ?? null,
@@ -368,7 +394,7 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
       if (existingItem.exists()) {
         const data = existingItem.data();
         const sameItem = data.lastOperationId === operationId && sameFields(data, item, [
-          'id', 'householdId', 'name', 'note', 'fullPriceMinor', 'coverMediaId', 'createdByUid', 'lastPaymentId'
+          'id', 'householdId', 'name', 'note', 'fullPriceMinor', 'etaDate', 'coverMediaId', 'createdByUid', 'lastPaymentId'
         ]);
         const samePayment = !payment || (existingPayment.exists() && existingPayment.data().lastOperationId === paymentOperationId
           && sameFields(existingPayment.data(), payment, ['id', 'itemId', 'type', 'amountMinor', 'occurredAt', 'note', 'receiptMediaId', 'ledgerMode', 'accountId', 'transactionId', 'actorUid']));
@@ -518,11 +544,12 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
         name,
         note: changes.note === undefined ? item.note : String(changes.note),
         fullPriceMinor,
+        etaDate: changes.etaDate === undefined ? (item.etaDate ?? null) : normaliseCalendarDate(changes.etaDate, '预计到达日期'),
         status: item.paidMinor === fullPriceMinor ? 'completed' : 'active',
         coverMediaId: requestedCoverId ?? null
       };
       if (item.lastOperationId === operationId) {
-        if (sameFields(item, requestedBusinessPayload, ['name', 'note', 'fullPriceMinor', 'status', 'coverMediaId'])) {
+        if (sameFields(item, requestedBusinessPayload, ['name', 'note', 'fullPriceMinor', 'etaDate', 'status', 'coverMediaId'])) {
           return { item, duplicate: true };
         }
         const error = new Error('operationId 已用于不同编辑载荷');

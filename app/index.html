@@ -75,25 +75,37 @@
       </div>
 
       <div class="overview-secondary">
-        <section class="content-section" aria-labelledby="categoryHeading">
+        <section class="content-section category-section" aria-labelledby="categoryHeading">
           <div class="section-row section-heading">
             <div>
-              <h2 id="categoryHeading">主要支出</h2>
-              <p>按本月支出金额排序</p>
+              <h2 id="categoryHeading">本月支出去向</h2>
+              <p>按分类查看支出占比</p>
             </div>
           </div>
-          <div class="category-insights" id="categoryInsightList" aria-live="polite"></div>
+          <div class="category-donut-composition">
+            <div class="category-donut" id="categoryDonut" role="img" aria-label="本月分类支出分布">
+              <div class="category-donut-center">
+                <strong id="categoryDonutTotal">RM 0.00</strong>
+                <span>本月支出</span>
+              </div>
+            </div>
+            <div class="category-insights" id="categoryInsightList" aria-live="polite">
+              <div class="donut-empty-state"><b>还没有本月支出</b><p>记录支出后，这里会显示各分类占比。</p></div>
+            </div>
+          </div>
         </section>
 
-        <section class="content-section" aria-labelledby="recentHeading">
+        <section class="content-section" aria-labelledby="upcomingHeading">
           <div class="section-row section-heading">
             <div>
-              <h2 id="recentHeading">最近账目</h2>
-              <p>收入、支出与转账</p>
+              <h2 id="upcomingHeading">近期需要处理</h2>
+              <p>还款、付款与预计到货</p>
             </div>
-            <button class="text-button" id="viewAllEntriesButton" type="button">查看全部</button>
+            <button class="text-button" id="viewAllEntriesButton" type="button">查看账目</button>
           </div>
-          <div class="transaction-list surface-list" id="recentTransactionList" aria-live="polite"></div>
+          <div class="upcoming-action-list surface-list" id="upcomingActionList" aria-live="polite">
+            <div class="empty-state upcoming-empty-state"><b>近期没有待处理事项</b><p>信用卡还款、贷款计划和物品预计到货会显示在这里。</p></div>
+          </div>
         </section>
       </div>
     </section>
@@ -151,16 +163,16 @@
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12l-2 0l9 -9l9 9l-2 0M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/></svg>
       <span>概览</span>
     </button>
-    <button class="nav-item" data-view-target="entries" type="button">
-      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 21v-16a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v16l-3 -2l-2 2l-2 -2l-2 2l-2 -2l-3 2M9 7h6M9 11h6M13 15h2"/></svg>
-      <span>账目</span>
+    <button class="nav-item" id="accountsNav" data-view-target="accounts" type="button">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg>
+      <span>账户</span>
     </button>
     <button class="quick-add" id="newEntryButton" type="button" aria-label="新增账目">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
     </button>
-    <button class="nav-item" id="accountsNav" data-view-target="accounts" type="button">
-      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg>
-      <span>账户</span>
+    <button class="nav-item" data-view-target="entries" type="button">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 21v-16a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v16l-3 -2l-2 2l-2 -2l-2 2l-2 -2l-3 2M9 7h6M9 11h6M13 15h2"/></svg>
+      <span>账目</span>
     </button>
     <button class="nav-item" data-view-target="items" type="button">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14h-16zM8 9h8M8 13h8M8 17h5"/></svg>
@@ -220,11 +232,13 @@
       <div class="account-detail-hero">
         <div class="account-detail-avatar" id="accountDetailAvatar" aria-hidden="true"></div>
         <div class="account-detail-copy">
-          <span id="accountDetailKind">资产</span>
+          <span id="accountDetailKind">可用资金</span>
           <strong id="accountDetailBalance">RM 0.00</strong>
         </div>
         <button class="secondary-button compact" id="editAccountFromDetailButton" type="button">编辑账户</button>
       </div>
+      <div class="account-detail-metrics" id="accountDetailMetrics" aria-live="polite" hidden></div>
+      <button class="primary-button repayment-open-button" id="openRepaymentButton" type="button" hidden>记录还款</button>
       <div class="section-row account-detail-heading">
         <div><h3 id="accountDetailMonthLabel">本月账目</h3><p id="accountDetailCount">0 笔记录</p></div>
       </div>
@@ -255,18 +269,57 @@
           <p id="accountPhotoHelp">照片会在浏览器内裁切压缩，并随当前账本安全保存。</p>
         </div>
       </div>
-      <label class="field"><span>账户名称</span><input id="accountName" required maxlength="40" placeholder="例如：现金、Maybank"></label>
-      <fieldset class="segmented">
-        <label><input type="radio" name="accountKind" value="asset" checked><span>资产</span></label>
-        <label><input type="radio" name="accountKind" value="liability"><span>负债</span></label>
+      <label class="field"><span>账户名称</span><input id="accountName" required maxlength="40" placeholder="例如：现金、Maybank、车贷"></label>
+      <fieldset class="segmented account-subtype-control" id="accountSubtypeControl">
+        <legend>账户类型</legend>
+        <label><input type="radio" name="accountSubtype" value="asset" checked><span>可用资金</span></label>
+        <label><input type="radio" name="accountSubtype" value="credit_card"><span>信用卡</span></label>
+        <label><input type="radio" name="accountSubtype" value="loan"><span>贷款</span></label>
+        <label hidden><input type="radio" name="accountSubtype" value="generic_liability"><span>其他负债</span></label>
       </fieldset>
-      <label class="field" id="openingBalanceRow"><span>期初余额（RM）</span><input id="openingBalance" inputmode="decimal" value="0.00" required></label>
+      <div class="subtype-fields" id="creditCardFields" hidden>
+        <label class="field"><span>信用额度（RM，可选）</span><input id="creditLimit" inputmode="decimal" placeholder="0.00"></label>
+        <div class="form-field-pair">
+          <label class="field"><span>账单日（可选）</span><input id="statementDay" type="number" inputmode="numeric" min="1" max="31" placeholder="1-31"></label>
+          <label class="field"><span>还款日（可选）</span><input id="dueDay" type="number" inputmode="numeric" min="1" max="31" placeholder="1-31"></label>
+        </div>
+      </div>
+      <div class="subtype-fields" id="loanFields" hidden>
+        <label class="field"><span>贷款类型</span><select id="loanType"><option value="car">车贷</option><option value="home">房贷</option><option value="other">其他贷款</option></select></label>
+        <label class="field"><span>原始本金（RM，可选）</span><input id="originalPrincipal" inputmode="decimal" placeholder="0.00"></label>
+        <label class="field"><span>每期计划还款（RM，可选）</span><input id="scheduledPayment" inputmode="decimal" placeholder="0.00"></label>
+        <label class="field"><span>预计还清日期（可选）</span><input id="expectedPayoffDate" type="date"></label>
+      </div>
+      <label class="field" id="openingBalanceRow"><span id="openingBalanceLabel">当前余额（RM）</span><input id="openingBalance" inputmode="decimal" value="0.00" required></label>
       <label class="switch-row"><span><b>计入家庭净额</b><small>关闭后保留历史，但不计入首页总额</small></span><input id="includeInTotal" type="checkbox" checked></label>
       <p class="form-message" id="accountMessage" aria-live="polite"></p>
       <div class="sheet-actions">
         <button class="primary-button" id="saveAccountButton" type="submit">保存账户</button>
         <button class="danger-button" id="archiveAccountButton" type="button" hidden>归档此账户</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="repaymentDialog" class="modal repayment-modal">
+    <form method="dialog" id="repaymentForm">
+      <div class="sheet-head">
+        <div><p class="sheet-context">负债还款</p><h2 id="repaymentAccountName">账户</h2></div>
+        <button class="icon-button" type="button" data-close-dialog="repaymentDialog" aria-label="关闭">×</button>
+      </div>
+      <p class="sheet-description" id="repaymentBalanceCopy">从可用资金还款会同时减少现金和负债，不会再记一笔支出；账外资金只减少负债。</p>
+      <button class="secondary-button repayment-full-button" id="repaymentFullButton" type="button">填入全部待还金额</button>
+      <label class="field"><span>偿还本金（RM）</span><input id="repaymentPrincipal" inputmode="decimal" required placeholder="0.00"></label>
+      <label class="field" id="repaymentInterestRow" hidden><span>利息与费用（RM，可选）</span><input id="repaymentInterest" inputmode="decimal" placeholder="0.00"><small>贷款利息与费用计入支出，本金不计入支出。</small></label>
+      <fieldset class="segmented repayment-funding-control">
+        <legend>还款资金来源</legend>
+        <label><input type="radio" name="repaymentFunding" value="asset" checked><span>可用资金账户</span></label>
+        <label><input type="radio" name="repaymentFunding" value="off_ledger"><span>账外资金</span></label>
+      </fieldset>
+      <label class="field" id="repaymentSourceRow"><span>付款账户</span><select id="repaymentSourceAccount" required></select><small>选择后会减少此账户现金，同时降低负债。</small></label>
+      <label class="field"><span>还款日期</span><input id="repaymentDate" type="date" required></label>
+      <label class="field"><span>备注（可选）</span><input id="repaymentNote" maxlength="100" placeholder="例如：本月信用卡还款"></label>
+      <p class="form-message" id="repaymentMessage" aria-live="polite"></p>
+      <button class="primary-button" id="saveRepaymentButton" type="submit">保存还款</button>
     </form>
   </dialog>
 
@@ -331,6 +384,7 @@
       </div>
       <label class="field"><span>物品名称</span><input id="newItemName" name="name" maxlength="80" required placeholder="例如：相机、沙发"></label>
       <label class="field"><span>全价（RM）</span><input id="newItemFullPrice" name="fullPrice" inputmode="decimal" required placeholder="0.00"></label>
+      <label class="field"><span>预计到货日期（可选）</span><input id="newItemEtaDate" name="etaDate" type="date"></label>
       <label class="field"><span>备注（可选）</span><textarea id="newItemNote" name="note" maxlength="240" placeholder="型号、颜色或购买计划"></textarea></label>
       <label class="field file-field"><span>封面（可选）</span><input id="newItemCover" type="file" accept="image/jpeg,image/png,image/webp"><small id="newItemCoverStatus">浏览器内压缩为独立 JPEG 资料</small></label>
       <div class="deposit-panel">
@@ -361,6 +415,7 @@
           <span id="itemDetailState">收藏中</span>
           <strong id="itemDetailBalance">RM 0.00</strong>
           <small id="itemDetailPaid">已付 RM 0.00 / RM 0.00</small>
+          <small class="item-detail-eta" id="itemDetailEta" hidden></small>
           <span class="item-progress"><i id="itemDetailProgress"></i></span>
         </div>
       </div>
@@ -377,7 +432,22 @@
       <p class="form-message" id="itemDetailMessage" aria-live="polite"></p>
       <div class="section-row item-timeline-heading"><div><h3>付款时间线</h3><p id="itemPaymentCount">载入中…</p></div></div>
       <div class="payment-timeline" id="itemPaymentTimeline"></div>
-      <div class="receipt-preview" id="receiptPreview" hidden><img id="receiptImage" alt="付款凭证"><button class="text-button" id="closeReceiptButton" type="button">收起凭证</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="receiptViewerDialog" class="receipt-viewer" aria-labelledby="receiptViewerTitle">
+    <div class="receipt-viewer-shell">
+      <header class="receipt-viewer-head">
+        <div>
+          <h2 id="receiptViewerTitle">付款凭证</h2>
+          <p id="receiptViewerMeta">凭证详情</p>
+        </div>
+        <button class="icon-button receipt-viewer-close" id="closeReceiptViewerButton" type="button" aria-label="关闭凭证">×</button>
+      </header>
+      <div class="receipt-viewer-stage">
+        <img id="receiptViewerImage" alt="付款凭证">
+      </div>
+      <a class="secondary-button receipt-save-button" id="saveReceiptButton" download hidden>保存凭证</a>
     </div>
   </dialog>
 
@@ -407,6 +477,7 @@
       </div>
       <label class="field"><span>物品名称</span><input id="editItemName" maxlength="80" required></label>
       <label class="field"><span>全价（RM）</span><input id="editItemFullPrice" inputmode="decimal" required></label>
+      <label class="field"><span>预计到货日期（可选）</span><input id="editItemEtaDate" type="date"></label>
       <label class="field"><span>备注（可选）</span><textarea id="editItemNote" maxlength="240"></textarea></label>
       <label class="field file-field"><span>替换封面（可选）</span><input id="editItemCover" type="file" accept="image/jpeg,image/png,image/webp"><small id="editItemCoverStatus">不选择会保留现有封面</small></label>
       <label class="switch-row"><span><b>移除现有封面</b><small>替换图片时会自动关闭</small></span><input id="editItemRemoveCover" type="checkbox"></label>

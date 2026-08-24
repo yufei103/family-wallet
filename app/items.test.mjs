@@ -330,6 +330,64 @@ test('封面媒体引用可编辑和清除，幂等签名区分封面变化', ()
   assert.equal(cleared.item.coverMediaId, null);
 });
 
+test('到货日期可创建、编辑和清除，并参与规范化后的幂等指纹', () => {
+  const created = createItem(empty(), {
+    id: 'desk', name: '书桌', fullPriceMinor: 20000, etaDate: '2026-09-12',
+    operationId: 'create-desk', createdAt: T0
+  });
+  assert.equal(created.item.etaDate, '2026-09-12');
+  assert.equal(createItem(created.state, {
+    id: 'desk', name: '书桌', fullPriceMinor: 20000, etaDate: '2026-09-12',
+    operationId: 'create-desk', createdAt: T1
+  }).duplicate, true);
+  assert.throws(() => createItem(created.state, {
+    id: 'desk', name: '书桌', fullPriceMinor: 20000, etaDate: '2026-09-13',
+    operationId: 'create-desk'
+  }), /operationId 已用于不同操作/);
+
+  const edited = editItem(created.state, 'desk', { etaDate: '2026-09-20' }, {
+    operationId: 'edit-desk-eta', updatedAt: T1
+  });
+  assert.equal(edited.item.etaDate, '2026-09-20');
+  assert.equal(editItem(edited.state, 'desk', { etaDate: '2026-09-20' }, {
+    operationId: 'edit-desk-eta', updatedAt: T2
+  }).duplicate, true);
+  assert.throws(() => editItem(edited.state, 'desk', { etaDate: '2026-09-21' }, {
+    operationId: 'edit-desk-eta'
+  }), /operationId 已用于不同操作/);
+
+  const cleared = editItem(edited.state, 'desk', { etaDate: '   ' }, {
+    operationId: 'clear-desk-eta', updatedAt: T2
+  });
+  assert.equal(cleared.item.etaDate, null);
+  assert.equal(editItem(cleared.state, 'desk', { etaDate: null }, {
+    operationId: 'clear-desk-eta', updatedAt: T3
+  }).duplicate, true);
+});
+
+test('空到货日期规范化为 null，旧物品兼容；畸形或不存在日期严格拒绝', () => {
+  const blank = createItem(empty(), {
+    id: 'lamp', name: '台灯', fullPriceMinor: 5000, etaDate: '', operationId: 'create-lamp'
+  });
+  assert.equal(blank.item.etaDate, null);
+
+  const legacy = hydrateItemsState({
+    items: [{ id: 'legacy', name: '旧物品', fullPriceMinor: 1000 }]
+  });
+  assert.equal(legacy.items[0].etaDate, null);
+
+  for (const etaDate of ['2026-2-03', '2026-02-29', '2026-04-31', '2026-13-01', ' 2026-09-12 ', 20260912]) {
+    assert.throws(() => createItem(empty(), {
+      id: `bad-${String(etaDate)}`, name: '无效日期', fullPriceMinor: 1000,
+      etaDate, operationId: `create-bad-${String(etaDate)}`
+    }), /到货日期必须是有效的 YYYY-MM-DD/);
+    assert.throws(() => editItem(blank.state, 'lamp', { etaDate }, {
+      operationId: `edit-bad-${String(etaDate)}`
+    }), /到货日期必须是有效的 YYYY-MM-DD/);
+  }
+  assert.equal(blank.state.revision, 1);
+});
+
 test('订金只能作为第一笔付款，避免用新增记录替代作废/恢复更正路径', () => {
   const state = pay(itemState()).state;
   assert.throws(() => pay(state, {

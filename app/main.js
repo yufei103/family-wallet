@@ -1,7 +1,7 @@
 import {
-  applyOperation as applyLedgerOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger, formatRM, householdTotals,
+  accountSubtype, applyOperation as applyLedgerOperation, archiveAccount, compareEntriesNewestFirst, createAccount, createLedger, deriveLedger, formatRM, householdTotals,
   monthlySummary, moveToRecycleBin, permanentlyDelete, reconcile, restoreFromRecycleBin,
-  serialiseLedger, updateAccount, updateTransaction
+  remainingPayoffMonths, serialiseLedger, updateAccount, updateTransaction
 } from './ledger.js';
 import {
   archiveItem as archiveLocalItem, createItem as createLocalItem, createItemsState, editItem as editLocalItem,
@@ -11,7 +11,7 @@ import {
 import { compressItemMedia } from './item-media.js';
 import { createSyncCoordinator } from './cloud-sync.js';
 import {
-  displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch, normaliseDisplayItem,
+  describeEtaDate, displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch, normaliseDisplayItem,
   rawSnapshotHasOperation, renderItemCards, serialiseLocalEnvelope, withoutMediaDataUrls
 } from './items-view.js';
 
@@ -73,6 +73,7 @@ let coverObserver = null;
 let pendingItemCreate = null;
 let pendingPayment = null;
 let pendingItemEdit = null;
+let pendingRepayment = null;
 let requestedPaymentId = null;
 const mediaLoads = new Map();
 const itemActionOperations = new Map();
@@ -259,6 +260,17 @@ function accountById(id) { return ledger.accounts.find(account => account.id ===
 function itemById(id) { return itemRecords.find(item => item.id === id) || null; }
 function liveEntries() { return ledger.transactions.filter(entry => !entry.deletedAt && !entry.purgedAt); }
 function selectedEntries() { return liveEntries().filter(entry => entry.occurredAt.slice(0, 7) === selectedMonth); }
+function assetAccounts() { return activeAccounts().filter(account => accountSubtype(account) === 'asset'); }
+function entryAccounts(kind) {
+  if (kind === 'income' || kind === 'transfer') return assetAccounts();
+  return activeAccounts().filter(account => ['asset', 'credit_card', 'generic_liability'].includes(accountSubtype(account)));
+}
+function itemPaymentAccounts() {
+  return activeAccounts().filter(account => ['asset', 'credit_card'].includes(accountSubtype(account)));
+}
+function accountSubtypeLabel(account) {
+  return ({ asset:'可用资金', credit_card:'信用卡', loan:'贷款', generic_liability:'其他负债' })[accountSubtype(account)];
+}
 
 function accountAvatarMarkup(account) {
   return account?.photoDataUrl
@@ -283,14 +295,15 @@ function rememberEntryPreferences(kind, accountId, targetAccountId) {
 }
 
 function applyRememberedAccounts(kind) {
-  const accounts = activeAccounts();
+  const accounts = entryAccounts(kind);
   if (!accounts.length) return;
   const remembered = entryPreferences.byKind[kind] || {};
   const sourceId = accounts.some(account => account.id === remembered.accountId) ? remembered.accountId : accounts[0].id;
   $('#sourceAccount').value = sourceId;
   if (kind !== 'transfer') return;
-  const fallbackTarget = accounts.find(account => account.id !== sourceId)?.id || sourceId;
-  const targetId = accounts.some(account => account.id === remembered.targetAccountId && account.id !== sourceId)
+  const targets = assetAccounts();
+  const fallbackTarget = targets.find(account => account.id !== sourceId)?.id || sourceId;
+  const targetId = targets.some(account => account.id === remembered.targetAccountId && account.id !== sourceId)
     ? remembered.targetAccountId
     : fallbackTarget;
   $('#targetAccount').value = targetId;
@@ -422,23 +435,37 @@ function renderItemsView() {
   observeLazyCovers();
 }
 
-function clearReceipt() {
-  $('#receiptPreview').hidden = true;
-  $('#receiptImage').removeAttribute('src');
+function clearReceiptViewer() {
+  $('#receiptViewerImage').removeAttribute('src');
+  $('#receiptViewerMeta').textContent = '凭证详情';
+  $('#saveReceiptButton').removeAttribute('href');
+  $('#saveReceiptButton').hidden = true;
 }
 
-async function showReceipt(mediaId, button) {
-  if (!mediaId) return;
+function closeReceiptViewer() {
+  dismissDialog($('#receiptViewerDialog'), clearReceiptViewer);
+}
+
+async function showReceipt(payment, button) {
+  if (!payment?.receiptMediaId) return;
   const original = button.textContent;
   button.disabled = true;
   button.textContent = '载入中…';
   $('#itemDetailMessage').textContent = '';
   try {
-    const media = await loadMediaOnce(currentMediaHouseholdId(), mediaId);
+    const media = await loadMediaOnce(currentMediaHouseholdId(), payment.receiptMediaId);
     if (!media?.dataUrl) throw new Error('找不到付款凭证');
-    $('#receiptImage').src = media.dataUrl;
-    $('#receiptPreview').hidden = false;
-    $('#receiptPreview').scrollIntoView({ behavior:'smooth', block:'nearest' });
+    const item = itemById(payment.itemId ?? selectedItemId);
+    const label = payment.type === 'deposit' ? '订金凭证' : '付款凭证';
+    $('#receiptViewerTitle').textContent = item?.name ? `${item.name} · ${label}` : label;
+    $('#receiptViewerMeta').textContent = [formatRM(payment.amountMinor), dateLabel(payment.occurredAt ?? payment.createdAt), payment.note].filter(Boolean).join(' · ');
+    $('#receiptViewerImage').src = media.dataUrl;
+    $('#receiptViewerImage').alt = `${item?.name ?? '物品'}${label}`;
+    const saveLink = $('#saveReceiptButton');
+    saveLink.href = media.dataUrl;
+    saveLink.download = `family-wallet-${payment.type === 'deposit' ? 'deposit' : 'payment'}-${String(payment.occurredAt ?? today()).slice(0, 10)}.jpg`;
+    saveLink.hidden = false;
+    if (!$('#receiptViewerDialog').open) showDialog($('#receiptViewerDialog'));
   } catch (error) {
     $('#itemDetailMessage').textContent = `无法读取凭证：${error.message}`;
   } finally {
@@ -456,11 +483,12 @@ function paymentTimelineMarkup(payments) {
       const linked = payment.mode === 'linked';
       const label = payment.type === 'deposit' ? '订金' : '付款';
       const receipt = payment.receiptMediaId
-        ? `<button class="minor-button" type="button" data-view-receipt="${escapeHtml(payment.receiptMediaId)}">查看凭证</button>` : '';
+        ? `<button class="minor-button" type="button" data-view-receipt="${escapeHtml(payment.id)}">查看凭证</button>` : '';
       const correction = voided
         ? `<button class="minor-button" data-restore-payment="${escapeHtml(payment.id)}" type="button">恢复付款</button>`
         : `<button class="minor-button delete" data-void-payment="${escapeHtml(payment.id)}" type="button">作废付款</button>`;
-      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div><b>${label} · ${formatRM(payment.amountMinor)}</b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${correction}</div></div>`;
+      const menu = `<details class="payment-menu"><summary class="minor-button" aria-label="付款更正菜单">⋯</summary><div class="payment-menu-popover">${correction}</div></details>`;
+      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div><b>${label} · ${formatRM(payment.amountMinor)}</b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${menu}</div></div>`;
     }).join('');
 }
 
@@ -475,6 +503,9 @@ function renderItemDetail() {
   $('#itemDetailBalance').textContent = formatRM(item.balanceMinor);
   $('#itemDetailPaid').textContent = `已付 ${formatRM(item.paidMinor)} / ${formatRM(item.fullPriceMinor)}`;
   $('#itemDetailProgress').style.width = `${item.progress}%`;
+  const etaDescription = item.etaDate ? describeEtaDate(item.etaDate, today()) : '';
+  $('#itemDetailEta').textContent = etaDescription;
+  $('#itemDetailEta').hidden = !etaDescription;
   $('#itemDetailNote').textContent = item.note || '暂无备注';
   $('#itemDetailMessage').textContent = '';
   const archived = item.status === 'archived';
@@ -491,7 +522,7 @@ function renderItemDetail() {
     ? `<img src="${escapeHtml(cover.dataUrl)}" alt="${escapeHtml(item.name)} 封面">`
     : '<div class="item-cover-placeholder"><span aria-hidden="true">FW</span><small>暂无封面</small></div>';
   $('#itemPaymentTimeline').querySelectorAll('[data-view-receipt]').forEach(button => {
-    button.addEventListener('click', () => showReceipt(button.dataset.viewReceipt, button));
+    button.addEventListener('click', () => showReceipt(currentItemPayments.find(payment => payment.id === button.dataset.viewReceipt), button));
   });
   $('#itemPaymentTimeline').querySelectorAll('[data-void-payment]').forEach(button => {
     button.addEventListener('click', () => correctItemPayment('void', button.dataset.voidPayment, button));
@@ -525,7 +556,7 @@ function cleanupItemDetail() {
   selectedItemId = null;
   requestedPaymentId = null;
   currentItemPayments = [];
-  clearReceipt();
+  clearReceiptViewer();
 }
 
 function closeItemDetail(afterClose) {
@@ -543,7 +574,7 @@ function openItemDetail(itemId, paymentId = null) {
   stopItemPaymentsWatch = null;
   selectedItemId = itemId;
   requestedPaymentId = paymentId;
-  clearReceipt();
+  clearReceiptViewer();
   currentItemPayments = runtimeMode === 'local'
     ? itemsState.itemPayments.filter(payment => payment.itemId === itemId).map(normalisePayment)
     : [];
@@ -685,6 +716,7 @@ function openEditItem() {
   $('#editItemForm').reset();
   $('#editItemName').value = item.name;
   $('#editItemFullPrice').value = senToAmount(item.fullPriceMinor);
+  $('#editItemEtaDate').value = item.etaDate || '';
   $('#editItemNote').value = item.note || '';
   $('#editItemMessage').textContent = '';
   $('#editItemCoverStatus').textContent = '不选择会保留现有封面';
@@ -780,6 +812,16 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
     return `<div class="empty-state"><b>${escapeHtml(emptyTitle)}</b><p>${escapeHtml(emptyBody)}</p><button class="secondary-button" type="button" data-add-entry>记录第一笔</button></div>`;
   }
   return entries.map(entry => {
+    if (entry.kind === 'repayment') {
+      const target = accountById(entry.targetAccountId);
+      const source = accountById(entry.accountId);
+      const targetContext = contextAccountId === entry.targetAccountId;
+      const shownMinor = targetContext ? entry.principalMinor : entry.amountMinor;
+      const metadata = `${dateLabel(entry.occurredAt)} · ${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'}${entry.interestMinor ? ` · 含利息 ${formatRM(entry.interestMinor)}` : ''}${entry.note ? ` · ${entry.note}` : ''}`;
+      const amountClass = targetContext ? '' : 'expense';
+      const amountText = targetContext ? `−欠款 ${formatRM(shownMinor)}` : `−${formatRM(shownMinor)}`;
+      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">还</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span></button>`;
+    }
     const isLinkedItemPayment = entry.sourceType === 'itemPayment';
     const linkedItem = isLinkedItemPayment ? itemById(entry.sourceItemId) : null;
     const sign = entry.kind === 'expense' ? '−' : entry.kind === 'income' ? '＋' : '↔';
@@ -798,29 +840,124 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
   }).join('');
 }
 
+const CATEGORY_COLORS = ['#0b5f5b', '#d28a27', '#4f759b', '#8a6a9f', '#7d8986'];
+
 function spendingCategories(entries) {
   const totals = new Map();
   for (const entry of entries) {
-    if (entry.kind !== 'expense') continue;
-    const category = String(entry.category || '其他').trim() || '其他';
-    totals.set(category, (totals.get(category) || 0) + entry.amountMinor);
+    let category = null;
+    let amount = 0;
+    if (entry.kind === 'expense') {
+      category = String(entry.category || '其他').trim() || '其他';
+      amount = entry.amountMinor;
+    } else if (entry.kind === 'repayment' && Number.isSafeInteger(entry.interestMinor) && entry.interestMinor > 0) {
+      category = '贷款利息与费用';
+      amount = entry.interestMinor;
+    }
+    if (!category || amount <= 0) continue;
+    totals.set(category, (totals.get(category) || 0) + amount);
   }
-  const rows = [...totals.entries()].sort((a, b) => b[1] - a[1]);
-  const total = rows.reduce((sum, [, amount]) => sum + amount, 0);
-  return rows.slice(0, 3).map(([category, amount], index) => ({
-    category,
-    amount,
-    rank:index + 1,
-    percent:total ? Math.round((amount / total) * 100) : 0
+  const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
+  const total = sorted.reduce((sum, [, amount]) => sum + amount, 0);
+  const visible = sorted.slice(0, 4).map(([category, amount]) => [category, amount]);
+  if (sorted.length > 4) {
+    const remainder = sorted.slice(4).reduce((sum, [, amount]) => sum + amount, 0);
+    const existingOther = visible.findIndex(([category]) => category === '其他');
+    if (existingOther >= 0) visible[existingOther][1] += remainder;
+    else visible.push(['其他', remainder]);
+  }
+  return {
+    total,
+    rows:visible.map(([category, amount], index) => ({
+      category,
+      amount,
+      color:CATEGORY_COLORS[index],
+      percent:total ? Math.round((amount / total) * 100) : 0
+    }))
+  };
+}
+
+function renderCategoryOverview(entries) {
+  const breakdown = spendingCategories(entries);
+  const donut = $('#categoryDonut');
+  $('#categoryDonutTotal').textContent = formatRM(breakdown.total);
+  if (!breakdown.rows.length) {
+    donut.style.background = 'conic-gradient(var(--surface-soft) 0 100%)';
+    donut.setAttribute('aria-label', '本月还没有支出');
+    $('#categoryInsightList').innerHTML = '<div class="donut-empty-state"><b>还没有本月支出</b><p>记录支出后，这里会显示各分类占比。</p></div>';
+    return;
+  }
+  let cursor = 0;
+  const segments = breakdown.rows.map(row => {
+    const start = cursor;
+    cursor += (row.amount / breakdown.total) * 100;
+    return `${row.color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
+  });
+  donut.style.background = `conic-gradient(${segments.join(', ')})`;
+  donut.setAttribute('aria-label', `本月分类支出分布，总计 ${formatRM(breakdown.total)}`);
+  $('#categoryInsightList').innerHTML = breakdown.rows.map(row => `<div class="category-row"><span class="category-swatch" style="--category-color:${row.color}" aria-hidden="true"></span><span class="category-main"><b>${escapeHtml(row.category)}</b><small>本月支出分类</small></span><span class="category-value"><b>${formatRM(row.amount)}</b><small>${row.percent}%</small></span></div>`).join('');
+}
+
+function daysInUtcMonth(year, monthIndex) {
+  return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+}
+
+function nextMonthlyDate(day, baseDate = today()) {
+  const [year, month, date] = baseDate.split('-').map(Number);
+  const candidate = (targetYear, targetMonth) => {
+    const clampedDay = Math.min(day, daysInUtcMonth(targetYear, targetMonth));
+    return `${String(targetYear).padStart(4, '0')}-${String(targetMonth + 1).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`;
+  };
+  const current = candidate(year, month - 1);
+  if (current >= baseDate && day >= date) return current;
+  const nextMonth = month === 12 ? 0 : month;
+  const nextYear = month === 12 ? year + 1 : year;
+  return candidate(nextYear, nextMonth);
+}
+
+function renderUpcomingActions() {
+  const actions = [];
+  for (const account of activeAccounts()) {
+    const subtype = accountSubtype(account);
+    if (subtype === 'credit_card' && account.balanceMinor > 0 && account.dueDay) {
+      const dueDate = nextMonthlyDate(account.dueDay);
+      actions.push({ type:'account', id:account.id, sortDate:dueDate, icon:'卡', iconClass:'repayment', title:`${account.name} 还款日`, detail:`当前欠款 ${formatRM(account.balanceMinor)}`, value:describeEtaDate(dueDate, today()).replace(/^预计/, '') });
+    } else if (subtype === 'loan' && account.balanceMinor > 0 && account.scheduledPaymentMinor) {
+      actions.push({ type:'account', id:account.id, sortDate:account.expectedPayoffDate || '9999-12-31', icon:'贷', iconClass:'repayment', title:`${account.name} 每期还款`, detail:`剩余本金 ${formatRM(account.balanceMinor)}`, value:formatRM(account.scheduledPaymentMinor), meta:account.expectedPayoffDate ? `预计 ${account.expectedPayoffDate} 还清` : '按计划还款' });
+    }
+  }
+  for (const item of itemRecords) {
+    if (!item.etaDate || item.archivedAt || item.status === 'archived') continue;
+    actions.push({ type:'item', id:item.id, sortDate:item.etaDate, icon:'物', iconClass:'eta', title:`${item.name} 预计到货`, detail:item.balanceMinor > 0 ? `待付 ${formatRM(item.balanceMinor)}` : '已付清', value:describeEtaDate(item.etaDate, today()) });
+  }
+  actions.sort((a, b) => a.sortDate.localeCompare(b.sortDate) || a.title.localeCompare(b.title, 'zh-CN'));
+  const visible = actions.slice(0, 5);
+  const list = $('#upcomingActionList');
+  if (!visible.length) {
+    list.innerHTML = '<div class="empty-state upcoming-empty-state"><b>近期没有待处理事项</b><p>信用卡还款、贷款计划和物品预计到货会显示在这里。</p></div>';
+    return;
+  }
+  list.innerHTML = visible.map(action => `<button class="upcoming-action-row" type="button" data-upcoming-type="${action.type}" data-upcoming-id="${escapeHtml(action.id)}"><span class="upcoming-action-icon ${action.iconClass}" aria-hidden="true">${action.icon}</span><span class="upcoming-action-main"><b>${escapeHtml(action.title)}</b><small>${escapeHtml(action.detail)}</small></span><span class="upcoming-action-value">${escapeHtml(action.value)}${action.meta ? `<small>${escapeHtml(action.meta)}</small>` : ''}</span></button>`).join('');
+  list.querySelectorAll('[data-upcoming-type]').forEach(button => button.addEventListener('click', () => {
+    if (button.dataset.upcomingType === 'item') openItemDetail(button.dataset.upcomingId);
+    else openAccountDetail(button.dataset.upcomingId);
   }));
 }
 
-function renderCategoryInsights(entries) {
-  const categories = spendingCategories(entries);
-  if (!categories.length) {
-    return '<div class="empty-state"><b>还没有本月支出</b><p>记录第一笔支出后，这里会显示钱主要花在哪里。</p><button class="secondary-button" type="button" data-add-entry>新增支出</button></div>';
-  }
-  return categories.map(item => `<div class="category-row"><span class="category-rank">${item.rank}</span><span class="category-main"><b>${escapeHtml(item.category)}</b><small>本月支出分类</small></span><span class="category-value"><b>${formatRM(item.amount)}</b><small>${item.percent}%</small></span></div>`).join('');
+function accountRowMarkup(account) {
+  const subtype = accountSubtype(account);
+  const debt = account.kind === 'liability';
+  const subtypeClass = subtype.replace('_', '-');
+  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${accountSubtypeLabel(account)} · ${account.includeInTotal ? '计入家庭净额' : '不计入总额'}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${debt ? (subtype === 'loan' ? '剩余本金' : '当前欠款') : '当前余额'}</small></span><span class="row-chevron">${chevronIcon}</span></button>`;
+}
+
+function renderAccountGroups(accounts) {
+  const groups = [
+    ['可用资金', accounts.filter(account => accountSubtype(account) === 'asset')],
+    ['信用卡', accounts.filter(account => accountSubtype(account) === 'credit_card')],
+    ['贷款与其他负债', accounts.filter(account => ['loan', 'generic_liability'].includes(accountSubtype(account)))]
+  ];
+  return `<div class="account-groups">${groups.filter(([, rows]) => rows.length).map(([title, rows]) => `<section class="account-group"><div class="account-group-heading"><h3>${title}</h3><span>${rows.length} 个账户</span></div><div class="account-group-list">${rows.map(accountRowMarkup).join('')}</div></section>`).join('')}</div>`;
 }
 
 function renderAccountDetail() {
@@ -836,11 +973,28 @@ function renderAccountDetail() {
   const pageStart = (accountDetailPage - 1) * pageSize;
   const visibleEntries = entries.slice(pageStart, pageStart + pageSize);
   $('#accountDetailName').textContent = account.name;
-  $('#accountDetailKind').textContent = account.kind === 'liability' ? '负债账户' : '资产账户';
+  const subtype = accountSubtype(account);
+  $('#accountDetailKind').textContent = accountSubtypeLabel(account);
   $('#accountDetailBalance').textContent = formatRM(account.balanceMinor);
   $('#accountDetailAvatar').innerHTML = accountAvatarMarkup(account);
   $('#accountDetailMonthLabel').textContent = `${monthLabel(selectedMonth)}账目`;
   $('#accountDetailCount').textContent = `${entries.length} 笔记录`;
+  const metrics = $('#accountDetailMetrics');
+  const metricRows = [];
+  if (subtype === 'credit_card') {
+    metricRows.push(['当前欠款', formatRM(account.balanceMinor)]);
+    if (account.creditLimitMinor) metricRows.push(['信用额度', formatRM(account.creditLimitMinor)], ['可用额度', formatRM(Math.max(0, account.creditLimitMinor - account.balanceMinor))]);
+    if (account.statementDay) metricRows.push(['账单日', `每月 ${account.statementDay} 日`]);
+    if (account.dueDay) metricRows.push(['还款日', `每月 ${account.dueDay} 日`]);
+  } else if (subtype === 'loan') {
+    metricRows.push(['剩余本金', formatRM(account.balanceMinor)]);
+    if (account.originalPrincipalMinor) metricRows.push(['原始本金', formatRM(account.originalPrincipalMinor)], ['已偿还进度', `${Math.round(Math.max(0, Math.min(1, 1 - account.balanceMinor / account.originalPrincipalMinor)) * 100)}%`]);
+    if (account.scheduledPaymentMinor) metricRows.push(['每期计划', formatRM(account.scheduledPaymentMinor)]);
+    if (account.expectedPayoffDate) metricRows.push(['预计还清', `${account.expectedPayoffDate} · 剩余 ${remainingPayoffMonths(account)} 个月`]);
+  }
+  metrics.innerHTML = metricRows.map(([label, value]) => `<div><span>${label}</span><b>${value}</b></div>`).join('');
+  metrics.hidden = !metricRows.length;
+  $('#openRepaymentButton').hidden = account.kind !== 'liability';
   $('#accountDetailTransactionList').innerHTML = renderTransactionRows(visibleEntries, '这个月没有相关账目', '此账户在所选月份没有收入、支出或转账。', account.id);
   const pagination = $('#accountDetailPagination');
   pagination.hidden = totalPages <= 1;
@@ -859,12 +1013,76 @@ function openAccountDetail(accountId) {
   showDialog($('#accountDetailDialog'));
 }
 
+function updateRepaymentFunding() {
+  const assetFunding = document.querySelector('input[name="repaymentFunding"]:checked')?.value === 'asset';
+  $('#repaymentSourceRow').hidden = !assetFunding;
+  $('#repaymentSourceAccount').required = assetFunding;
+}
+
+function openRepayment(accountId, transactionId = null) {
+  const account = accountById(accountId);
+  const entry = transactionId ? ledger.transactions.find(candidate => candidate.id === transactionId && !candidate.deletedAt) : null;
+  if (!account || account.kind !== 'liability') return;
+  if (!navigator.onLine) {
+    showToast('记录还款需要联网。');
+    return;
+  }
+  const reviewing = Boolean(entry);
+  pendingRepayment = { accountId, transactionId:entry?.id ?? null, operationId:uid('repayment') };
+  const form = $('#repaymentForm');
+  form.reset();
+  form.querySelectorAll('input, select').forEach(control => { control.disabled = false; });
+  populateAccounts();
+  const subtype = accountSubtype(account);
+  $('#repaymentAccountName').textContent = reviewing ? `查看 ${account.name} 还款` : account.name;
+  $('#repaymentBalanceCopy').textContent = reviewing
+    ? `这笔还款本金 ${formatRM(entry.principalMinor)}${entry.interestMinor ? `，利息与费用 ${formatRM(entry.interestMinor)}` : ''}；当前剩余欠款 ${formatRM(account.balanceMinor)}。如需更正，请移入回收站后重新记录。`
+    : `当前待还 ${formatRM(account.balanceMinor)}；本金降低负债，贷款利息计入当月支出。`;
+  $('#repaymentPrincipal').value = reviewing ? senToAmount(entry.principalMinor) : '';
+  $('#repaymentInterest').value = entry?.interestMinor ? senToAmount(entry.interestMinor) : '';
+  $('#repaymentInterestRow').hidden = subtype !== 'loan';
+  document.querySelector(`input[name="repaymentFunding"][value="${entry?.accountId ? 'asset' : reviewing ? 'off_ledger' : 'asset'}"]`).checked = true;
+  $('#repaymentSourceAccount').value = entry?.accountId ?? assetAccounts()[0]?.id ?? '';
+  $('#repaymentDate').value = entry?.occurredAt?.slice(0, 10) ?? today();
+  $('#repaymentNote').value = entry?.note ?? '';
+  $('#repaymentMessage').textContent = '';
+  $('#repaymentFullButton').hidden = reviewing;
+  $('#saveRepaymentButton').hidden = reviewing;
+  const archive = $('#archiveRepaymentButton');
+  if (archive) archive.hidden = !reviewing;
+  updateRepaymentFunding();
+  if (reviewing) form.querySelectorAll('input, select').forEach(control => { control.disabled = true; });
+  showDialog($('#repaymentDialog'));
+}
+
+function ensureRepaymentArchiveButton() {
+  if ($('#archiveRepaymentButton')) return;
+  const button = document.createElement('button');
+  button.id = 'archiveRepaymentButton';
+  button.type = 'button';
+  button.className = 'danger-button';
+  button.textContent = '移入回收站';
+  button.hidden = true;
+  $('#saveRepaymentButton').insertAdjacentElement('afterend', button);
+  button.addEventListener('click', async () => {
+    if (!pendingRepayment?.transactionId || !navigator.onLine) return;
+    const operationId = uid('repayment-recycle');
+    try {
+      const result = moveToRecycleBin(ledger, pendingRepayment.transactionId, operationId);
+      await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, pendingRepayment.transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', pendingRepayment.transactionId, operationId));
+      dismissDialog($('#repaymentDialog'));
+      showToast('还款已移入回收站。');
+    } catch (error) { $('#repaymentMessage').textContent = error.message; }
+  });
+}
+
 function bindRenderedControls(root = document) {
   root.querySelectorAll('[data-account-id]').forEach(button => button.addEventListener('click', () => openAccountDetail(button.dataset.accountId)));
   root.querySelectorAll('[data-transaction-id]').forEach(button => button.addEventListener('click', () => {
-    const open = () => button.dataset.linkedItemId
-      ? openItemFromLedger(button.dataset.linkedItemId, button.dataset.linkedPaymentId)
-      : openEntry(button.dataset.transactionId);
+    const entry = ledger.transactions.find(candidate => candidate.id === button.dataset.transactionId);
+    const open = () => entry?.kind === 'repayment'
+      ? openRepayment(entry.targetAccountId, entry.id)
+      : button.dataset.linkedItemId ? openItemFromLedger(button.dataset.linkedItemId, button.dataset.linkedPaymentId) : openEntry(button.dataset.transactionId);
     if ($('#accountDetailDialog').open) dismissDialog($('#accountDetailDialog'), open);
     else open();
   }));
@@ -892,27 +1110,38 @@ function render() {
   status.classList.toggle('bad', !check.ok);
 
   const accounts = activeAccounts();
-  $('#accountList').innerHTML = accounts.length ? accounts.map(account => `<button class="account-row ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" aria-label="查看 ${escapeHtml(account.name)} 当月明细"><span class="account-mark ${account.kind === 'liability' ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${account.kind === 'liability' ? '负债' : '资产'} · ${account.includeInTotal ? '计入家庭净额' : '不计入总额'}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>查看当月明细</small></span><span class="row-chevron">${chevronIcon}</span></button>`).join('') : '<div class="empty-state"><b>还没有账户</b><p>新增现金、银行或信用卡账户，开始建立家庭账本。</p><button class="secondary-button" type="button" data-new-account>新增账户</button></div>';
+  $('#accountList').innerHTML = accounts.length ? renderAccountGroups(accounts) : '<div class="empty-state"><b>还没有账户</b><p>新增现金、银行或信用卡账户，开始建立家庭账本。</p><button class="secondary-button" type="button" data-new-account>新增账户</button></div>';
 
   const entries = selectedEntries().sort(compareEntriesNewestFirst);
   $('#transactionList').innerHTML = renderTransactionRows(entries, '这个月还没有账目', '新增一笔收入、支出或转账后，会在这里显示。');
 
-  const recent = liveEntries().sort(compareEntriesNewestFirst).slice(0, 4);
-  $('#recentTransactionList').innerHTML = renderTransactionRows(recent, '还没有最近账目', '记录第一笔支出后，首页会保留最常查看的最近记录。');
-  $('#categoryInsightList').innerHTML = renderCategoryInsights(entries);
+  renderCategoryOverview(entries);
   renderItemsView();
+  renderUpcomingActions();
 
   bindRenderedControls();
   if (selectedAccountDetailId && $('#accountDetailDialog').open) renderAccountDetail();
   document.querySelectorAll('[data-new-account]').forEach(button => button.addEventListener('click', () => openAccount()));
 }
 
+function accountOptions(accounts) {
+  return accounts.map(account => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${formatRM(account.balanceMinor)}</option>`).join('');
+}
+
+function populateEntryAccounts(kind, sourceId = null, targetId = null) {
+  $('#sourceAccount').innerHTML = accountOptions(entryAccounts(kind));
+  $('#targetAccount').innerHTML = accountOptions(assetAccounts());
+  if (sourceId && entryAccounts(kind).some(account => account.id === sourceId)) $('#sourceAccount').value = sourceId;
+  if (targetId && assetAccounts().some(account => account.id === targetId)) $('#targetAccount').value = targetId;
+}
+
 function populateAccounts() {
-  const options = activeAccounts().map(account => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${formatRM(account.balanceMinor)}</option>`).join('');
-  $('#sourceAccount').innerHTML = options;
-  $('#targetAccount').innerHTML = options;
-  $('#newItemAccount').innerHTML = options;
-  $('#paymentAccount').innerHTML = options;
+  const kind = document.querySelector('input[name="kind"]:checked')?.value ?? 'expense';
+  populateEntryAccounts(kind);
+  const itemOptions = accountOptions(itemPaymentAccounts());
+  $('#newItemAccount').innerHTML = itemOptions;
+  $('#paymentAccount').innerHTML = itemOptions;
+  $('#repaymentSourceAccount').innerHTML = accountOptions(assetAccounts());
 }
 
 function selectCategory(value = '', focusCustom = false) {
@@ -940,9 +1169,11 @@ function selectCategory(value = '', focusCustom = false) {
 }
 
 function updateKindState() {
-  const transfer = document.querySelector('input[name="kind"]:checked').value === 'transfer';
+  const kind = document.querySelector('input[name="kind"]:checked').value;
+  const transfer = kind === 'transfer';
   $('#targetRow').hidden = !transfer;
   $('#categoryRow').hidden = transfer;
+  populateEntryAccounts(kind, $('#sourceAccount').value, $('#targetAccount').value);
 }
 
 function openEntry(id = null) {
@@ -961,13 +1192,16 @@ function openEntry(id = null) {
     openItemFromLedger(entry.sourceItemId, entry.sourcePaymentId);
     return;
   }
+  if (entry?.kind === 'repayment') {
+    openRepayment(entry.targetAccountId, entry.id);
+    return;
+  }
 
   pendingOperationId = uid(entry ? 'edit' : 'op');
   saveLocked = false;
   $('#saveEntryButton').disabled = false;
   $('#entryMessage').textContent = '';
   $('#entryForm').reset();
-  populateAccounts();
   $('#editingTransactionId').value = entry?.id || '';
   $('#entryDialogTitle').textContent = entry ? '编辑账目' : '新增账目';
   $('#saveEntryButton').textContent = entry ? '保存修改' : '保存账目';
@@ -975,6 +1209,7 @@ function openEntry(id = null) {
 
   if (entry) {
     document.querySelector(`input[name="kind"][value="${entry.kind}"]`).checked = true;
+    updateKindState();
     $('#amountInput').value = senToAmount(entry.amountMinor);
     $('#sourceAccount').value = entry.accountId;
     $('#targetAccount').value = entry.targetAccountId || '';
@@ -983,12 +1218,12 @@ function openEntry(id = null) {
     $('#dateInput').value = entry.occurredAt.slice(0, 10);
   } else {
     document.querySelector(`input[name="kind"][value="${entryPreferences.lastKind}"]`).checked = true;
+    updateKindState();
     applyRememberedAccounts(entryPreferences.lastKind);
     selectCategory('');
     $('#dateInput').value = today();
   }
 
-  updateKindState();
   showDialog($('#entryDialog'));
   setTimeout(() => $('#amountInput').focus(), 30);
 }
@@ -1044,8 +1279,29 @@ async function compressAccountPhoto(file) {
   return photo;
 }
 
+function optionalMoney(input, label) {
+  const value = input.value.trim();
+  if (!value) return null;
+  try { return amountToSen(value); } catch { throw new Error(`${label}必须大于零`); }
+}
+
+function optionalDay(input) {
+  if (!input.value) return null;
+  const value = Number(input.value);
+  if (!Number.isInteger(value) || value < 1 || value > 31) throw new Error('账单日期必须介于 1 至 31');
+  return value;
+}
+
+function updateAccountSubtypeFields() {
+  const subtype = document.querySelector('input[name="accountSubtype"]:checked')?.value ?? 'asset';
+  $('#creditCardFields').hidden = subtype !== 'credit_card';
+  $('#loanFields').hidden = subtype !== 'loan';
+  $('#openingBalanceLabel').textContent = subtype === 'asset' ? '当前余额（RM）' : '当前欠款（RM）';
+}
+
 function openAccount(id = null) {
   const account = id ? ledger.accounts.find(item => item.id === id) : null;
+  const subtype = account ? accountSubtype(account) : 'asset';
   pendingAccountOperationId = uid(account ? 'account-edit' : 'account-create');
   $('#accountForm').reset();
   $('#accountMessage').textContent = '';
@@ -1059,7 +1315,17 @@ function openAccount(id = null) {
   $('#includeInTotal').checked = account ? account.includeInTotal !== false : true;
   pendingAccountPhotoDataUrl = account?.photoDataUrl || null;
   renderAccountPhotoPreview();
-  document.querySelector(`input[name="accountKind"][value="${account?.kind || 'asset'}"]`).checked = true;
+  const generic = document.querySelector('input[name="accountSubtype"][value="generic_liability"]');
+  generic.closest('label').hidden = !account;
+  document.querySelector(`input[name="accountSubtype"][value="${subtype}"]`).checked = true;
+  $('#creditLimit').value = account?.creditLimitMinor ? senToAmount(account.creditLimitMinor) : '';
+  $('#statementDay').value = account?.statementDay ?? '';
+  $('#dueDay').value = account?.dueDay ?? '';
+  $('#loanType').value = account?.loanType ?? 'car';
+  $('#originalPrincipal').value = account?.originalPrincipalMinor ? senToAmount(account.originalPrincipalMinor) : '';
+  $('#scheduledPayment').value = account?.scheduledPaymentMinor ? senToAmount(account.scheduledPaymentMinor) : '';
+  $('#expectedPayoffDate').value = account?.expectedPayoffDate ?? '';
+  updateAccountSubtypeFields();
   showDialog($('#accountDialog'));
   setTimeout(() => $('#accountName').focus(), 30);
 }
@@ -1120,6 +1386,7 @@ async function exportLocal() {
 
 function requestDialogClose(dialog) {
   if (dialog?.id === 'itemDetailDialog') closeItemDetail();
+  else if (dialog?.id === 'receiptViewerDialog') closeReceiptViewer();
   else dismissDialog(dialog);
 }
 
@@ -1160,7 +1427,7 @@ $('#payItemPartButton').addEventListener('click', () => openPaymentDialog(false)
 $('#editItemButton').addEventListener('click', openEditItem);
 $('#archiveItemButton').addEventListener('click', event => runItemLifecycle('archive', event.currentTarget));
 $('#restoreItemButton').addEventListener('click', event => runItemLifecycle('restore', event.currentTarget));
-$('#closeReceiptButton').addEventListener('click', clearReceipt);
+$('#closeReceiptViewerButton').addEventListener('click', closeReceiptViewer);
 $('#editItemCover').addEventListener('change', event => {
   if (event.target.files?.length) $('#editItemRemoveCover').checked = false;
   if (pendingItemEdit) {
@@ -1223,6 +1490,7 @@ $('#newItemForm').addEventListener('submit', async event => {
         createdAt:pendingItemCreate.createdAt,
         name:$('#newItemName').value.trim(),
         note:$('#newItemNote').value.trim(),
+        etaDate:$('#newItemEtaDate').value || null,
         fullPriceMinor,
         coverMedia:cover,
         deposit
@@ -1239,6 +1507,7 @@ $('#newItemForm').addEventListener('submit', async event => {
         actor:'local',
         name:$('#newItemName').value.trim(),
         note:$('#newItemNote').value.trim(),
+        etaDate:$('#newItemEtaDate').value || null,
         fullPriceMinor,
         coverMediaId:cover?.id ?? null,
         deposit:deposit ? { ...deposit, receiptMedia:undefined } : null
@@ -1341,6 +1610,7 @@ $('#editItemForm').addEventListener('submit', async event => {
     const changes = {
       name:$('#editItemName').value.trim(),
       note:$('#editItemNote').value.trim(),
+      etaDate:$('#editItemEtaDate').value || null,
       fullPriceMinor:amountToSen($('#editItemFullPrice').value)
     };
     if (cover) changes.coverMediaId = cover.id;
@@ -1399,6 +1669,49 @@ $('#accountDetailPrevPage').addEventListener('click', () => {
 $('#accountDetailNextPage').addEventListener('click', () => {
   accountDetailPage += 1;
   renderAccountDetail();
+});
+ensureRepaymentArchiveButton();
+document.querySelectorAll('input[name="accountSubtype"]').forEach(input => input.addEventListener('change', updateAccountSubtypeFields));
+document.querySelectorAll('input[name="repaymentFunding"]').forEach(input => input.addEventListener('change', updateRepaymentFunding));
+$('#openRepaymentButton').addEventListener('click', () => openRepayment(selectedAccountDetailId));
+$('#repaymentFullButton').addEventListener('click', () => {
+  const account = accountById(pendingRepayment?.accountId);
+  if (account && !pendingRepayment?.transactionId) $('#repaymentPrincipal').value = senToAmount(account.balanceMinor);
+});
+$('#repaymentForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!pendingRepayment) return;
+  const button = $('#saveRepaymentButton');
+  button.disabled = true;
+  $('#repaymentMessage').textContent = '';
+  try {
+    if (!navigator.onLine) throw new Error('记录还款需要联网');
+    if (pendingRepayment.transactionId) throw new Error('既有还款不能直接覆写，请移入回收站后重新记录');
+    const account = accountById(pendingRepayment.accountId);
+    if (!account || account.kind !== 'liability') throw new Error('还款账户不存在');
+    const principalMinor = amountToSen($('#repaymentPrincipal').value);
+    const interestMinor = accountSubtype(account) === 'loan' && $('#repaymentInterest').value.trim() ? amountToSen($('#repaymentInterest').value) : 0;
+    const funding = document.querySelector('input[name="repaymentFunding"]:checked').value;
+    const changes = {
+      kind:'repayment',
+      accountId:funding === 'asset' ? $('#repaymentSourceAccount').value : null,
+      targetAccountId:account.id,
+      principalMinor,
+      interestMinor,
+      amountMinor:principalMinor + interestMinor,
+      category:null,
+      note:$('#repaymentNote').value.trim(),
+      occurredAt:`${$('#repaymentDate').value || today()}T12:00:00.000Z`
+    };
+    if (funding === 'asset' && !changes.accountId) throw new Error('请选择付款账户');
+    const result = applyLedgerOperation(ledger, { id:pendingRepayment.operationId, ...changes });
+    const transactionId = pendingRepayment.operationId;
+    await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', transactionId, pendingRepayment.operationId));
+    pendingRepayment = null;
+    dismissDialog($('#repaymentDialog'));
+    showToast('还款已保存。');
+  } catch (error) { $('#repaymentMessage').textContent = error.message; }
+  finally { button.disabled = false; }
 });
 document.querySelectorAll('[data-category]').forEach(button => button.addEventListener('click', () => {
   selectCategory(button.dataset.category, button.dataset.category === '其它');
@@ -1500,13 +1813,29 @@ $('#accountForm').addEventListener('submit', async event => {
     const id = $('#editingAccountId').value;
     const name = $('#accountName').value;
     const includeInTotal = $('#includeInTotal').checked;
-    const nextLedger = id ? updateAccount(ledger, id, { name, includeInTotal, photoDataUrl:pendingAccountPhotoDataUrl }) : createAccount(ledger, {
+    const subtype = document.querySelector('input[name="accountSubtype"]:checked').value;
+    const kind = subtype === 'asset' ? 'asset' : 'liability';
+    const metadata = {
+      subtype,
+      kind,
+      creditLimitMinor:subtype === 'credit_card' ? optionalMoney($('#creditLimit'), '信用额度') : null,
+      statementDay:subtype === 'credit_card' ? optionalDay($('#statementDay')) : null,
+      dueDay:subtype === 'credit_card' ? optionalDay($('#dueDay')) : null,
+      loanType:subtype === 'loan' ? $('#loanType').value : null,
+      originalPrincipalMinor:subtype === 'loan' ? optionalMoney($('#originalPrincipal'), '原始本金') : null,
+      scheduledPaymentMinor:subtype === 'loan' ? optionalMoney($('#scheduledPayment'), '计划还款额') : null,
+      expectedPayoffDate:subtype === 'loan' ? ($('#expectedPayoffDate').value || null) : null
+    };
+    const openingBalanceMinor = id ? null : amountToSen($('#openingBalance').value, true);
+    if (!id && kind === 'liability' && openingBalanceMinor < 0) throw new Error('当前欠款不能为负数');
+    const changes = { name, includeInTotal, photoDataUrl:pendingAccountPhotoDataUrl, ...metadata };
+    const nextLedger = id ? updateAccount(ledger, id, changes) : createAccount(ledger, {
       id:uid('account'),
       name,
-      kind:document.querySelector('input[name="accountKind"]:checked').value,
-      openingBalanceMinor:amountToSen($('#openingBalance').value, true),
+      openingBalanceMinor,
       includeInTotal,
-      photoDataUrl:pendingAccountPhotoDataUrl
+      photoDataUrl:pendingAccountPhotoDataUrl,
+      ...metadata
     });
     const accountId = id || nextLedger.accounts.at(-1).id;
     await applyLedgerChange(nextLedger, next => saveAccountRecord(next, accountId), pendingLedgerPatch(nextLedger, 'accountPatch', accountId, pendingAccountOperationId));
@@ -1573,6 +1902,7 @@ function restartItemsListener(householdId) {
     itemRecords = state.items.map(normaliseDisplayItem);
     renderSyncStatus();
     renderItemsView();
+    renderUpcomingActions();
     if (selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
   }, error => {
     if (householdId !== desiredHouseholdId) return;
