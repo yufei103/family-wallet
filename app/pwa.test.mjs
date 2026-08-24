@@ -43,7 +43,21 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-13/);
+  assert.match(worker, /family-wallet-v2-cloud-14/);
+});
+
+test('Service Worker 升级会绕过脚本缓存并自动刷新仍挂着旧 DOM 的窗口', async () => {
+  const [main, worker] = await Promise.all([readFile(app('./main.js'), 'utf8'), readFile(app('./service-worker.js'), 'utf8')]);
+  assert.match(main, /register\('\.\/service-worker\.js', \{ updateViaCache:'none' \}\)/);
+  assert.match(main, /\.then\(registration => registration\.update\(\)\)/);
+  assert.match(worker, /cache\.addAll\(ASSETS\.map\(asset => new Request\(asset, \{ cache:'reload' \}\)\)\)/);
+  assert.match(worker, /self\.skipWaiting\(\)/);
+  assert.match(worker, /self\.clients\.claim\(\)/);
+  assert.match(worker, /self\.clients\.matchAll\(\{ type:'window', includeUncontrolled:true \}\)/);
+  assert.match(worker, /refreshUrl\.searchParams\.set\('wallet-sw', CACHE\)/);
+  assert.match(worker, /windowClients\.forEach\(client =>/);
+  assert.match(worker, /client\.navigate\(refreshUrl\.href\)\.catch\(\(\) => \{\}\)/);
+  assert.doesNotMatch(worker, /Promise\.all\(windowClients/);
 });
 
 test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {

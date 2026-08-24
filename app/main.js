@@ -2282,5 +2282,9 @@ document.addEventListener('visibilitychange', () => {
 });
 
 applyTheme(localStorage.getItem(THEME_STORE) || document.documentElement.dataset.theme || 'teal', { persist:false });
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./service-worker.js', { updateViaCache:'none' })
+    .then(registration => registration.update())
+    .catch(() => {});
+}
 startRuntime().catch(error => showAuth(`无法启动：${error.message}`));

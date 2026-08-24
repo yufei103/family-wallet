@@ -1,4 +1,4 @@
-const CACHE = 'family-wallet-v2-cloud-13';
+const CACHE = 'family-wallet-v2-cloud-14';
 const ASSETS = [
   './', './index.html', './styles.css', './main.js', './ledger.js', './items.js', './item-media.js', './items-view.js', './cloud-sync.js',
   './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
@@ -7,7 +7,7 @@ const ASSETS = [
 
 self.addEventListener('install', event => event.waitUntil(
   caches.open(CACHE)
-    .then(cache => cache.addAll(ASSETS))
+    .then(cache => cache.addAll(ASSETS.map(asset => new Request(asset, { cache:'reload' }))))
     .then(() => self.skipWaiting())
 ));
 
@@ -17,6 +17,14 @@ self.addEventListener('activate', event => event.waitUntil(
       .filter(cacheName => cacheName !== CACHE)
       .map(cacheName => caches.delete(cacheName))))
     .then(() => self.clients.claim())
+    .then(() => self.clients.matchAll({ type:'window', includeUncontrolled:true }))
+    .then(windowClients => {
+      windowClients.forEach(client => {
+        const refreshUrl = new URL(client.url);
+        refreshUrl.searchParams.set('wallet-sw', CACHE);
+        client.navigate(refreshUrl.href).catch(() => {});
+      });
+    })
 ));
 
 self.addEventListener('fetch', event => {
