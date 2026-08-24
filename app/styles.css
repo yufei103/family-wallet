@@ -471,7 +471,14 @@ dialog::backdrop { background: rgba(9, 25, 22, 0.42); backdrop-filter: blur(9px)
 .segmented span { display: grid; place-items: center; min-height: 40px; border-radius: 9px; color: var(--muted); font-size: 13px; font-weight: 750; }
 .segmented input:checked + span { background: var(--surface); color: var(--accent-strong); box-shadow: 0 2px 6px rgba(16, 48, 42, 0.08); }
 .segmented input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
-.account-subtype-control { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.account-subtype-control { min-inline-size: 0; margin: 0 0 18px; padding: 0; overflow: visible; border: 0; background: transparent; }
+.account-subtype-control legend { display: block; width: 100%; margin: 0 0 7px; padding: 0; color: var(--muted); font-size: 12px; font-weight: 650; line-height: 1.35; }
+.account-subtype-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; width: 100%; min-width: 0; padding: 4px; border-radius: var(--radius-control); background: var(--surface-soft); }
+.account-subtype-options label { min-width: 0; }
+.account-subtype-options input { position: absolute; opacity: 0; pointer-events: none; }
+.account-subtype-options span { display: grid; place-items: center; min-height: 44px; padding-inline: 6px; border-radius: 9px; color: var(--muted); font-size: 13px; font-weight: 750; line-height: 1.2; text-align: center; }
+.account-subtype-options input:checked + span { background: var(--surface); color: var(--accent-strong); box-shadow: 0 2px 6px rgba(16, 48, 42, 0.08); }
+.account-subtype-options input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
 .subtype-fields { margin: -6px 0 16px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-muted); }
 .subtype-fields > .field:last-child, .form-field-pair > .field { margin-bottom: 0; }
 .form-field-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -749,7 +756,7 @@ body.is-switching [data-mutation] { pointer-events: none; opacity: .45; }
   .account-detail-avatar { width: 56px; height: 56px; }
   .account-detail-hero .secondary-button { grid-column: 1 / -1; width: 100%; }
   .account-detail-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .account-subtype-control span { padding-inline: 4px; font-size: 12px; text-align: center; }
+  .account-subtype-options span { padding-inline: 4px; font-size: 12px; }
   .account-photo-editor { align-items: flex-start; }
   .item-detail-hero { grid-template-columns: 112px minmax(0, 1fr); gap: 14px; }
   .detail-primary-actions { grid-template-columns: 1fr; }

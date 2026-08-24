@@ -1020,7 +1020,7 @@ function renderUpcomingActions() {
     }
   }
   for (const item of itemRecords) {
-    if (!item.etaDate || item.archivedAt || item.status === 'archived') continue;
+    if (item.deletedAt || !item.etaDate || item.archivedAt || item.status === 'archived') continue;
     actions.push({ type:'item', id:item.id, sortDate:item.etaDate, icon:'物', iconClass:'eta', title:`${item.name} 预计到货`, detail:item.balanceMinor > 0 ? `待付 ${formatRM(item.balanceMinor)}` : '已付清', value:describeEtaDate(item.etaDate, today()) });
   }
   actions.sort((a, b) => a.sortDate.localeCompare(b.sortDate) || a.title.localeCompare(b.title, 'zh-CN'));

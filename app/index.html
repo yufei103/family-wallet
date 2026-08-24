@@ -271,12 +271,14 @@
         </div>
       </div>
       <label class="field"><span>账户名称</span><input id="accountName" required maxlength="40" placeholder="例如：现金、Maybank、车贷"></label>
-      <fieldset class="segmented account-subtype-control" id="accountSubtypeControl">
+      <fieldset class="account-subtype-control" id="accountSubtypeControl">
         <legend>账户类型</legend>
-        <label><input type="radio" name="accountSubtype" value="asset" checked><span>可用资金</span></label>
-        <label><input type="radio" name="accountSubtype" value="credit_card"><span>信用卡</span></label>
-        <label><input type="radio" name="accountSubtype" value="loan"><span>贷款</span></label>
-        <label hidden><input type="radio" name="accountSubtype" value="generic_liability"><span>其他负债</span></label>
+        <div class="account-subtype-options">
+          <label><input type="radio" name="accountSubtype" value="asset" checked><span>可用资金</span></label>
+          <label><input type="radio" name="accountSubtype" value="credit_card"><span>信用卡</span></label>
+          <label><input type="radio" name="accountSubtype" value="loan"><span>贷款</span></label>
+          <label hidden><input type="radio" name="accountSubtype" value="generic_liability"><span>其他负债</span></label>
+        </div>
       </fieldset>
       <div class="subtype-fields" id="creditCardFields" hidden>
         <label class="field"><span>信用额度（RM，可选）</span><input id="creditLimit" inputmode="decimal" placeholder="0.00"></label>

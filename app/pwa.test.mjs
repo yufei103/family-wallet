@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-16/);
+  assert.match(worker, /family-wallet-v2-cloud-17/);
 });
 
 test('Service Worker 强制更新资源、导航走网络，并把刷新交给有表单保护的页面', async () => {
@@ -435,12 +435,18 @@ test('概览圆环统计真实消费并呈现近期负债与 ETA 事项', async 
   assert.match(main, /renderCategoryOverview\(entries\);\s*renderItemsView\(\);\s*renderUpcomingActions\(\);/);
   assert.match(main, /subtype === 'credit_card'.*account\.dueDay/s);
   assert.match(main, /subtype === 'loan'.*account\.scheduledPaymentMinor/s);
+  assert.match(main, /item\.deletedAt \|\| !item\.etaDate \|\| item\.archivedAt/);
   assert.match(main, /item\.etaDate.*data-upcoming-type/s);
+  assert.match(html, /class="account-subtype-options"/);
+  assert.doesNotMatch(html, /class="segmented account-subtype-control"/);
   assert.match(main, /class="account-groups"/);
   assert.match(main, /class="account-group-heading"/);
   assert.match(html, /id="categoryDonutTotal"/);
   assert.match(html, /id="upcomingActionList"/);
   assert.doesNotMatch(html, /recentTransactionList/);
   assert.match(styles, /\.category-donut\s*\{/);
+  assert.match(styles, /\.account-subtype-control\s*\{[^}]*min-inline-size:\s*0[^}]*background:\s*transparent/s);
+  assert.match(styles, /\.account-subtype-options\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)[^}]*min-width:\s*0/s);
+  assert.match(styles, /\.account-subtype-options span\s*\{[^}]*min-height:\s*44px/s);
   assert.match(styles, /\.upcoming-action-row\s*\{/);
 });
