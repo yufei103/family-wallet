@@ -11,6 +11,7 @@ const memberEmail = 'member@gmail.com';
 const T0 = '2026-08-22T00:00:00.000Z';
 const T1 = '2026-08-22T01:00:00.000Z';
 const T2 = '2026-08-22T02:00:00.000Z';
+const T3 = '2026-08-22T03:00:00.000Z';
 const JPEG = 'data:image/jpeg;base64,/9j/2Q==';
 let env;
 
@@ -414,6 +415,53 @@ test('linked 作废与恢复必须同步账目 deletedAt，并保留原 actorUid
   restoreBatch.set(doc(member, 'households', householdId, 'itemPayments', payment.id), restorePayment);
   restoreBatch.set(doc(member, 'households', householdId, 'transactions', payment.transactionId), restoreTx);
   await assertSucceeds(restoreBatch.commit());
+});
+
+test('删除物品必须先原子作废付款与联动账目；删除后付款不可单独恢复', async () => {
+  const owner = authDb('owner-a', ownerEmail);
+  const item = await createPlainItem(owner, 'delete-bike', { fullPriceMinor:1000 });
+  const payment = paymentRecord('delete-pay', item.id, { ledgerMode:'linked', amountMinor:1000 });
+  const paid = await addPaymentAtomic(owner, item, payment, true);
+  await assertFails(setDoc(doc(owner, 'households', householdId, 'items', item.id), {
+    ...paid.item, deletedAt:T2, deletedByUid:'owner-a', updatedAt:T2, revision:3, lastOperationId:'delete-paid-item'
+  }));
+
+  const voidOperation = 'delete-item-void-payment';
+  const voidPayment = { ...payment, status:'voided', voidedAt:T2, updatedAt:T2, lastOperationId:voidOperation };
+  const voidItem = {
+    ...paid.item, paidMinor:0, status:'active', updatedAt:T2, revision:3,
+    lastOperationId:voidOperation, lastPaymentId:payment.id
+  };
+  const voidTx = { ...transactionRecord(payment), deletedAt:T2, lastOperationId:voidOperation };
+  const voidBatch = writeBatch(owner);
+  voidBatch.set(doc(owner, 'households', householdId, 'items', item.id), voidItem);
+  voidBatch.set(doc(owner, 'households', householdId, 'itemPayments', payment.id), voidPayment);
+  voidBatch.set(doc(owner, 'households', householdId, 'transactions', payment.transactionId), voidTx);
+  await assertSucceeds(voidBatch.commit());
+
+  const deleted = {
+    ...voidItem, deletedAt:T3, deletedByUid:'owner-a', updatedAt:T3,
+    revision:4, lastOperationId:'delete-item-final'
+  };
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'items', item.id), deleted));
+
+  const forbiddenRestore = writeBatch(owner);
+  forbiddenRestore.set(doc(owner, 'households', householdId, 'items', item.id), {
+    ...deleted, paidMinor:1000, status:'completed', updatedAt:'2026-08-22T04:00:00.000Z', revision:5,
+    lastOperationId:'restore-payment-while-deleted', lastPaymentId:payment.id
+  });
+  forbiddenRestore.set(doc(owner, 'households', householdId, 'itemPayments', payment.id), {
+    ...voidPayment, status:'active', voidedAt:null, updatedAt:'2026-08-22T04:00:00.000Z', lastOperationId:'restore-payment-while-deleted'
+  });
+  forbiddenRestore.set(doc(owner, 'households', householdId, 'transactions', payment.transactionId), {
+    ...voidTx, deletedAt:null, lastOperationId:'restore-payment-while-deleted'
+  });
+  await assertFails(forbiddenRestore.commit());
+
+  await assertSucceeds(setDoc(doc(owner, 'households', householdId, 'items', item.id), {
+    ...deleted, deletedAt:null, deletedByUid:null, updatedAt:'2026-08-22T05:00:00.000Z',
+    revision:5, lastOperationId:'restore-deleted-item'
+  }));
 });
 
 test('linked 付款或账目不可单独作废/恢复，付款 actorUid 不可改写', async () => {

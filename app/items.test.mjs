@@ -4,10 +4,12 @@ import {
   archiveItem,
   createItem,
   createItemsState,
+  deleteItem,
   deriveItem,
   editItem,
   hydrateItemsState,
   recordItemPayment,
+  restoreDeletedItem,
   restoreItem,
   restoreItemPayment,
   serialiseItemsState,
@@ -266,6 +268,32 @@ test('恢复旧付款若会因后续付款导致超付则拒绝', () => {
   state = pay(state, { paymentId: 'pay-2', operationId: 'record-pay-2', amountMinor: 1000, occurredAt: T3 }).state;
   assert.throws(() => restoreItemPayment(state, 'pay-1', { operationId: 'restore-pay-1' }), /超过物品全价/);
   assert.equal(deriveItem(state, 'bike').paidMinor, 1000);
+});
+
+test('删除物品必须先作废全部付款；删除与恢复保持付款作废且可幂等重送', () => {
+  const paid = pay(itemState(), { mode:'linked', accountId:'cash' }).state;
+  assert.throws(
+    () => deleteItem(paid, 'bike', { operationId:'delete-bike', deletedAt:T2, actor:'parent-a' }),
+    /先作废此物品的所有付款/
+  );
+  const voided = voidItemPayment(paid, 'bike', 'pay-1', { operationId:'delete-bike-pay-1', occurredAt:T2, actor:'parent-a' });
+  const deleted = deleteItem(voided.state, 'bike', {
+    operationId:'delete-bike', expectedRevision:voided.state.revision, deletedAt:T2, actor:'parent-a'
+  });
+  assert.equal(deleted.item.deletedAt, T2);
+  assert.equal(deleted.item.deletedBy, 'parent-a');
+  assert.equal(deriveItem(deleted.state, 'bike').paidMinor, 0);
+  assert.throws(() => pay(deleted.state, { paymentId:'pay-2', operationId:'pay-after-delete' }), /已删除物品/);
+  assert.equal(deleteItem(deleted.state, 'bike', { operationId:'delete-bike' }).duplicate, true);
+
+  const restored = restoreDeletedItem(deleted.state, 'bike', {
+    operationId:'restore-deleted-bike', expectedRevision:deleted.state.revision, restoredAt:T3, actor:'parent-b'
+  });
+  const restoredItem = deriveItem(restored.state, 'bike');
+  assert.equal(restoredItem.deletedAt, null);
+  assert.equal(restoredItem.paidMinor, 0);
+  assert.equal(restoredItem.status, 'active');
+  assert.equal(restoredItem.payments[0].status, 'voided');
 });
 
 test('未结清物品拒绝归档且不污染状态', () => {
