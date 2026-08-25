@@ -9,7 +9,7 @@ import {
   restoreItem as restoreLocalItem, restoreItemPayment as restoreLocalItemPayment, serialiseItemsState,
   voidItemPayment as voidLocalItemPayment
 } from './items.js';
-import { compressItemMedia } from './item-media.js';
+import { compressItemMedia, normaliseCoverEditState } from './item-media.js';
 import { createSyncCoordinator } from './cloud-sync.js';
 import {
   describeEtaDate, displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch, normaliseDisplayItem,
@@ -43,6 +43,7 @@ let saveLocked = false;
 let pendingOperationId = uid('op');
 let pendingAccountOperationId = uid('account');
 let toastTimer;
+let viewTransitionTimer;
 let selectedMonth = today().slice(0, 7);
 let activeView = 'overview';
 let entryPreferences = hydrateEntryPreferences();
@@ -76,6 +77,8 @@ let coverObserver = null;
 let pendingItemCreate = null;
 let pendingPayment = null;
 let pendingItemEdit = null;
+let newItemCoverEdit = { mode:'full', zoom:1, offsetX:0, offsetY:0, sourceWidth:0, sourceHeight:0 };
+let newItemCoverPreviewUrl = null;
 let pendingRepayment = null;
 let repaymentReturnAccountId = null;
 let requestedPaymentId = null;
@@ -205,29 +208,60 @@ function applyCoordinatorState(state) {
   setView(activeView, false);
 }
 
-function showDialog(dialog) {
-  dialog.classList.remove('is-closing');
+const DIALOG_CLOSE_FALLBACK_MS = 220;
+const prefersReducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function dialogMotionPanel(dialog) {
+  if (dialog?.classList.contains('topbar-actions-dialog')) return dialog.querySelector('.topbar-actions-panel');
+  if (dialog?.classList.contains('account-picker-dialog')) return dialog.querySelector('.account-picker-panel');
+  if (dialog?.classList.contains('receipt-viewer')) return dialog.querySelector('.receipt-viewer-shell');
+  return dialog?.querySelector(':scope > form, :scope > div') ?? null;
+}
+
+function showDialog(dialog, afterOpen) {
+  if (!dialog || dialog.open) return;
+  dialog.classList.remove('is-open', 'is-closing');
+  dialog.classList.add('is-preparing');
   dialog.showModal();
+  const finishOpen = () => {
+    if (!dialog.open || dialog.classList.contains('is-closing')) return;
+    dialog.classList.remove('is-preparing');
+    dialog.classList.add('is-open');
+    if (afterOpen) requestAnimationFrame(afterOpen);
+  };
+  if (prefersReducedMotion()) {
+    finishOpen();
+    return;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(finishOpen));
 }
 
 function dismissDialog(dialog, afterClose) {
   if (!dialog?.open || dialog.classList.contains('is-closing')) return;
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    dialog.close();
-    afterClose?.();
-    return;
-  }
-  dialog.classList.add('is-closing');
+  const panel = dialogMotionPanel(dialog);
   let finished = false;
+  let fallbackTimer = null;
   const finish = () => {
     if (finished) return;
     finished = true;
-    dialog.classList.remove('is-closing');
-    dialog.close();
+    if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+    panel?.removeEventListener('transitionend', onTransitionEnd);
+    dialog.classList.remove('is-preparing', 'is-open', 'is-closing');
+    if (dialog.open) dialog.close();
     afterClose?.();
   };
-  dialog.addEventListener('animationend', finish, { once:true });
-  setTimeout(finish, 190);
+  const onTransitionEnd = event => {
+    if (event.target !== panel || !['opacity', 'transform'].includes(event.propertyName)) return;
+    finish();
+  };
+  if (prefersReducedMotion() || !panel) {
+    finish();
+    return;
+  }
+  dialog.classList.remove('is-preparing', 'is-open');
+  dialog.classList.add('is-closing');
+  panel.addEventListener('transitionend', onTransitionEnd);
+  fallbackTimer = setTimeout(finish, DIALOG_CLOSE_FALLBACK_MS);
 }
 
 function usesCloudStore() { return runtimeMode === 'cloud' || runtimeMode === 'emulator'; }
@@ -321,6 +355,7 @@ function applyRememberedAccounts(kind) {
   const remembered = entryPreferences.byKind[kind] || {};
   const sourceId = accounts.some(account => account.id === remembered.accountId) ? remembered.accountId : accounts[0].id;
   $('#sourceAccount').value = sourceId;
+  accountPicker.sync('source');
   if (kind !== 'transfer') return;
   const targets = assetAccounts();
   const fallbackTarget = targets.find(account => account.id !== sourceId)?.id || sourceId;
@@ -328,6 +363,7 @@ function applyRememberedAccounts(kind) {
     ? remembered.targetAccountId
     : fallbackTarget;
   $('#targetAccount').value = targetId;
+  accountPicker.sync('target');
 }
 
 function amountToSen(value, allowNegative = false) {
@@ -372,6 +408,11 @@ function setView(view, scroll = true) {
     else button.removeAttribute('aria-current');
   });
   $('#viewTitle').textContent = viewTitles[view];
+  const activeSection = document.querySelector(`[data-view="${view}"]`);
+  document.querySelectorAll('[data-view-transition]').forEach(section => section.removeAttribute('data-view-transition'));
+  activeSection?.setAttribute('data-view-transition', 'entering');
+  clearTimeout(viewTransitionTimer);
+  viewTransitionTimer = setTimeout(() => activeSection?.removeAttribute('data-view-transition'), 220);
   if (scroll) window.scrollTo({ top:0, behavior:'smooth' });
 }
 
@@ -657,17 +698,124 @@ function commitLocalItemMutation(nextLedger, nextItemsState, nextMedia) {
   if (selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
 }
 
-async function prepareFormMedia(input, kind, pending, slot, statusElement) {
+async function prepareFormMedia(input, kind, pending, slot, statusElement, renderPlan = null) {
   const file = input.files?.[0] ?? null;
   if (!file) return null;
-  if (pending[`${slot}File`] === file && pending[slot]) return pending[slot];
+  const renderKey = renderPlan ? JSON.stringify(renderPlan) : '';
+  if (pending[`${slot}File`] === file && pending[`${slot}RenderKey`] === renderKey && pending[slot]) return pending[slot];
   statusElement.textContent = kind === 'cover' ? '正在压缩封面…' : '正在压缩凭证…';
-  const compressed = await compressItemMedia(file, kind);
+  const compressed = await compressItemMedia(file, kind, renderPlan ? { renderPlan } : {});
   const media = { id:pending[`${slot}Id`], ...compressed };
   pending[`${slot}File`] = file;
+  pending[`${slot}RenderKey`] = renderKey;
   pending[slot] = media;
   statusElement.textContent = `已压缩 · ${media.width} × ${media.height}`;
   return media;
+}
+
+function clearPendingNewItemMedia(slot) {
+  if (!pendingItemCreate) return;
+  pendingItemCreate[slot] = null;
+  pendingItemCreate[`${slot}File`] = null;
+  pendingItemCreate[`${slot}RenderKey`] = null;
+}
+
+function updateNewItemUploadRow(kind, file = null) {
+  const cover = kind === 'cover';
+  $(`#newItem${cover ? 'Cover' : 'Receipt'}FileName`).textContent = file?.name || (cover ? '未选择照片' : '未选择凭证');
+  $(`#newItem${cover ? 'Cover' : 'Receipt'}Choose`).textContent = file ? '重新选择' : (cover ? '选择照片' : '选择凭证');
+  $(`#removeNewItem${cover ? 'Cover' : 'Receipt'}`).hidden = !file;
+}
+
+function releaseNewItemCoverPreview() {
+  if (newItemCoverPreviewUrl) URL.revokeObjectURL(newItemCoverPreviewUrl);
+  newItemCoverPreviewUrl = null;
+  $('#newItemCoverPreview').removeAttribute('src');
+}
+
+function currentNewItemCoverRenderPlan() {
+  return {
+    mode:newItemCoverEdit.mode,
+    zoom:newItemCoverEdit.zoom,
+    offsetX:newItemCoverEdit.offsetX,
+    offsetY:newItemCoverEdit.offsetY
+  };
+}
+
+function renderNewItemCoverEditor() {
+  const editor = $('#newItemCoverEditor');
+  const image = $('#newItemCoverPreview');
+  if (!newItemCoverEdit.sourceWidth || !newItemCoverEdit.sourceHeight || !image.src) return;
+  newItemCoverEdit = { ...newItemCoverEdit, ...normaliseCoverEditState(newItemCoverEdit.sourceWidth, newItemCoverEdit.sourceHeight, newItemCoverEdit) };
+  const crop = newItemCoverEdit.mode === 'crop';
+  $('#newItemCoverZoomRow').hidden = !crop;
+  $('#newItemCoverZoom').value = String(newItemCoverEdit.zoom);
+  $('#newItemCoverCropHelp').textContent = crop
+    ? '拖动图片调整位置，使用滑杆缩放；裁切框不会出现空洞。'
+    : '完整图片会放入 4:5 画布，不会裁掉内容。';
+  const viewport = $('#newItemCoverViewport');
+  if (!crop) {
+    Object.assign(image.style, { width:'100%', height:'100%', left:'0px', top:'0px', objectFit:'contain' });
+    viewport.classList.remove('is-cropping');
+    return;
+  }
+
+  const frameWidth = viewport.clientWidth || 240;
+  const frameHeight = viewport.clientHeight || frameWidth * 1.25;
+  const scale = Math.max(frameWidth / newItemCoverEdit.sourceWidth, frameHeight / newItemCoverEdit.sourceHeight) * newItemCoverEdit.zoom;
+  const renderedWidth = newItemCoverEdit.sourceWidth * scale;
+  const renderedHeight = newItemCoverEdit.sourceHeight * scale;
+  const left = ((frameWidth - renderedWidth) / 2) + (newItemCoverEdit.offsetX * frameWidth / 400);
+  const top = ((frameHeight - renderedHeight) / 2) + (newItemCoverEdit.offsetY * frameHeight / 500);
+  Object.assign(image.style, { width:`${renderedWidth}px`, height:`${renderedHeight}px`, left:`${left}px`, top:`${top}px`, objectFit:'fill' });
+  viewport.classList.add('is-cropping');
+  editor.hidden = false;
+}
+
+function setNewItemCoverEdit(partial) {
+  if (!newItemCoverEdit.sourceWidth || !newItemCoverEdit.sourceHeight) return;
+  const next = normaliseCoverEditState(newItemCoverEdit.sourceWidth, newItemCoverEdit.sourceHeight, { ...newItemCoverEdit, ...partial });
+  newItemCoverEdit = { ...newItemCoverEdit, ...next };
+  clearPendingNewItemMedia('cover');
+  $('#newItemCoverStatus').textContent = '将在保存时按当前预览压缩为 JPEG';
+  renderNewItemCoverEditor();
+}
+
+function resetNewItemCoverEditor({ keepFile = false } = {}) {
+  newItemCoverEdit = { mode:'full', zoom:1, offsetX:0, offsetY:0, sourceWidth:0, sourceHeight:0 };
+  document.querySelector('input[name="newItemCoverMode"][value="full"]').checked = true;
+  $('#newItemCoverZoom').value = '1';
+  $('#newItemCoverZoomRow').hidden = true;
+  $('#newItemCoverEditor').hidden = true;
+  $('#newItemCoverViewport').classList.remove('is-cropping');
+  if (!keepFile) releaseNewItemCoverPreview();
+}
+
+function loadNewItemCoverPreview(file) {
+  releaseNewItemCoverPreview();
+  resetNewItemCoverEditor({ keepFile:true });
+  if (!file) return;
+  newItemCoverPreviewUrl = URL.createObjectURL(file);
+  const image = $('#newItemCoverPreview');
+  image.onload = () => {
+    newItemCoverEdit = { ...newItemCoverEdit, sourceWidth:image.naturalWidth, sourceHeight:image.naturalHeight };
+    $('#newItemCoverEditor').hidden = false;
+    renderNewItemCoverEditor();
+  };
+  image.onerror = () => {
+    $('#newItemCoverStatus').textContent = '无法预览这张图片，请重新选择';
+    $('#newItemCoverEditor').hidden = true;
+  };
+  image.src = newItemCoverPreviewUrl;
+}
+
+function resetNewItemMediaUI() {
+  releaseNewItemCoverPreview();
+  resetNewItemCoverEditor({ keepFile:true });
+  updateNewItemUploadRow('cover');
+  updateNewItemUploadRow('receipt');
+  $('#newItemCoverStatus').textContent = '选择后可保留完整图片或自定义 4:5 裁切';
+  $('#newItemReceiptStatus').textContent = '仅在保存订金时读取并压缩';
 }
 
 function updateNewItemDepositControls() {
@@ -687,16 +835,14 @@ function openNewItem() {
     createdAt:new Date().toISOString()
   };
   $('#newItemForm').reset();
+  resetNewItemMediaUI();
   populateAccounts();
   $('#newItemDepositDate').value = today();
   $('#newItemLinked').checked = true;
   $('#newItemMessage').textContent = '';
-  $('#newItemCoverStatus').textContent = '浏览器内压缩为独立 JPEG 资料';
-  $('#newItemReceiptStatus').textContent = '仅在请求时读取';
   $('#saveNewItemButton').disabled = false;
   updateNewItemDepositControls();
-  showDialog($('#newItemDialog'));
-  setTimeout(() => $('#newItemName').focus(), 30);
+  showDialog($('#newItemDialog'), () => $('#newItemName').focus());
 }
 
 function updatePaymentAccountRow() { $('#paymentAccountRow').hidden = !$('#paymentLinked').checked; }
@@ -723,8 +869,7 @@ function openPaymentDialog(full = false) {
   $('#paymentMessage').textContent = '';
   $('#paymentReceiptStatus').textContent = '会压缩并独立保存';
   updatePaymentAccountRow();
-  showDialog($('#paymentDialog'));
-  setTimeout(() => (full ? $('#paymentDate') : $('#paymentAmount')).focus(), 30);
+  showDialog($('#paymentDialog'), () => (full ? $('#paymentDate') : $('#paymentAmount')).focus());
 }
 
 function openEditItem() {
@@ -1141,6 +1286,7 @@ function updateRepaymentFunding() {
   const assetFunding = document.querySelector('input[name="repaymentFunding"]:checked')?.value === 'asset';
   $('#repaymentSourceRow').hidden = !assetFunding;
   $('#repaymentSourceAccount').required = assetFunding;
+  accountPicker.sync('repayment');
 }
 
 function currentRepaymentBreakdown(account) {
@@ -1205,6 +1351,7 @@ function openRepayment(accountId, transactionId = null, returnAccountId = null) 
   $('#repaymentInterestRow').hidden = mode !== 'reducing_balance';
   document.querySelector(`input[name="repaymentFunding"][value="${entry?.accountId ? 'asset' : reviewing ? 'off_ledger' : 'asset'}"]`).checked = true;
   $('#repaymentSourceAccount').value = entry?.accountId ?? assetAccounts()[0]?.id ?? '';
+  accountPicker.sync('repayment');
   $('#repaymentDate').value = entry?.occurredAt?.slice(0, 10) ?? today();
   $('#repaymentNote').value = entry?.note ?? '';
   $('#repaymentMessage').textContent = '';
@@ -1219,6 +1366,7 @@ function openRepayment(accountId, transactionId = null, returnAccountId = null) 
     $('#repaymentInterestPreviewRow').hidden = !entry.interestMinor;
     $('#repaymentBreakdown').hidden = false;
     form.querySelectorAll('input, select').forEach(control => { control.disabled = true; });
+    accountPicker.sync('repayment');
   } else renderRepaymentBreakdown();
   showDialog($('#repaymentDialog'));
 }
@@ -1293,29 +1441,239 @@ function render() {
   document.querySelectorAll('[data-new-account]').forEach(button => button.addEventListener('click', () => openAccount()));
 }
 
+function accountOptionDetails(account) {
+  const subtype = accountSubtype(account);
+  return {
+    type:subtype === 'loan' ? loanTypeLabel(account) : accountSubtypeLabel(account),
+    balance:account.kind === 'liability' ? `欠款 ${formatRM(account.balanceMinor)}` : `余额 ${formatRM(account.balanceMinor)}`
+  };
+}
+
 function accountOptions(accounts) {
   return accounts.map(account => {
-    const subtype = accountSubtype(account);
-    const type = subtype === 'loan' ? loanTypeLabel(account) : accountSubtypeLabel(account);
-    const balance = account.kind === 'liability' ? `欠款 ${formatRM(account.balanceMinor)}` : `余额 ${formatRM(account.balanceMinor)}`;
+    const { type, balance } = accountOptionDetails(account);
     return `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} ｜ ${escapeHtml(type)} ｜ ${escapeHtml(balance)}</option>`;
   }).join('');
 }
 
+function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, pickers }) {
+  const dialog = $(`#${dialogId}`);
+  const title = $(`#${titleId}`);
+  const list = $(`#${listId}`);
+  const panel = dialog.querySelector('.account-picker-panel');
+  const dragHandleSelector = '.account-picker-grabber, .account-picker-handle, .account-picker-head';
+  const dragCloseDistance = 72;
+  const dragCloseVelocity = 0.55;
+  const controls = Object.fromEntries(pickers.map(config => {
+    const trigger = $(`#${config.triggerId}`);
+    return [config.key, {
+      ...config,
+      select:$(`#${config.selectId}`),
+      trigger,
+      name:trigger.querySelector('.account-picker-name'),
+      type:trigger.querySelector('.account-picker-type'),
+      amount:trigger.querySelector('.account-picker-amount'),
+      accounts:[],
+      context:null
+    }];
+  }));
+  let activeKey = null;
+  let dragState = null;
+
+  const optionMarkup = (account, selectedId) => {
+    const details = accountOptionDetails(account);
+    const selected = account.id === selectedId;
+    return `<button class="account-picker-option" type="button" role="option" aria-selected="${selected}" tabindex="${selected ? '0' : '-1'}" data-account-picker-id="${escapeHtml(account.id)}"><span class="account-picker-name">${escapeHtml(account.name)}</span><span class="account-picker-type">${escapeHtml(details.type)}</span><span class="account-picker-amount">${escapeHtml(details.balance)}</span><span class="account-picker-check" aria-hidden="true">${selected ? '✓' : ''}</span></button>`;
+  };
+
+  const renderOptions = () => {
+    const control = controls[activeKey];
+    if (!control) return;
+    list.innerHTML = control.accounts.map(account => optionMarkup(account, control.select.value)).join('');
+  };
+
+  const sync = key => {
+    const control = controls[key];
+    const selected = control.accounts.find(account => account.id === control.select.value) || control.accounts[0] || null;
+    if (selected && control.select.value !== selected.id) control.select.value = selected.id;
+    const details = selected ? accountOptionDetails(selected) : { type:'', balance:'' };
+    control.name.textContent = selected?.name || '暂无可用账户';
+    control.type.textContent = details.type;
+    control.amount.textContent = details.balance;
+    control.trigger.disabled = control.select.disabled || !selected;
+    if (activeKey === key) renderOptions();
+  };
+
+  const resetDrag = (animate = false) => {
+    const dragY = (dragState?.dragY ?? Number.parseFloat(panel.style.getPropertyValue('--sheet-drag-y'))) || 0;
+    dragState = null;
+    panel.classList.remove('is-dragging');
+    if (animate && dragY > 0 && !prefersReducedMotion()) void panel.offsetHeight;
+    panel.style.setProperty('--sheet-drag-y', '0px');
+  };
+
+  const close = (returnFocus = false, { preserveDrag = false } = {}) => {
+    if (dialog.classList.contains('is-closing')) return;
+    const control = controls[activeKey];
+    const finishClose = () => {
+      resetDrag();
+      control?.trigger.setAttribute('aria-expanded', 'false');
+      activeKey = null;
+      if (returnFocus) control?.trigger.focus();
+    };
+    if (preserveDrag) {
+      dragState = null;
+      panel.classList.remove('is-dragging');
+      void panel.offsetHeight;
+    } else resetDrag();
+    if (!dialog.open) {
+      finishClose();
+      return;
+    }
+    dismissDialog(dialog, finishClose);
+  };
+
+  const open = (key, focusDirection = 'selected') => {
+    const control = controls[key];
+    if (!control?.accounts.length || control.trigger.disabled || dialog.open || dialog.classList.contains('is-closing')) return;
+    close();
+    activeKey = key;
+    sync(key);
+    title.textContent = control.title;
+    control.trigger.setAttribute('aria-expanded', 'true');
+    showDialog(dialog, () => {
+      const optionButtons = [...list.querySelectorAll('[role="option"]')];
+      const selectedIndex = optionButtons.findIndex(option => option.getAttribute('aria-selected') === 'true');
+      const index = focusDirection === 'last' ? optionButtons.length - 1 : Math.max(0, selectedIndex);
+      optionButtons[index]?.focus();
+    });
+  };
+
+  const setOptions = (key, context, preferredValue = null) => {
+    const control = controls[key];
+    const previousValue = control.select.value;
+    control.context = context;
+    control.accounts = control.options(context);
+    control.select.innerHTML = accountOptions(control.accounts);
+    const desiredValue = preferredValue ?? previousValue;
+    if (desiredValue && control.accounts.some(account => account.id === desiredValue)) control.select.value = desiredValue;
+    sync(key);
+  };
+
+  const selectOption = accountId => {
+    const control = controls[activeKey];
+    if (!control?.accounts.some(account => account.id === accountId)) return;
+    control.select.value = accountId;
+    sync(activeKey);
+    control.select.dispatchEvent(new Event('change', { bubbles:true }));
+    close();
+  };
+
+  for (const control of Object.values(controls)) {
+    control.trigger.addEventListener('click', () => open(control.key));
+    control.trigger.addEventListener('keydown', event => {
+      if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+      event.preventDefault();
+      open(control.key, event.key === 'ArrowUp' ? 'last' : 'selected');
+    });
+  }
+  list.addEventListener('click', event => {
+    const option = event.target.closest('[data-account-picker-id]');
+    if (option) selectOption(option.dataset.accountPickerId);
+  });
+  list.addEventListener('keydown', event => {
+    const optionButtons = [...list.querySelectorAll('[role="option"]')];
+    const currentIndex = optionButtons.indexOf(document.activeElement);
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const nextIndex = event.key === 'Home' ? 0
+      : event.key === 'End' ? optionButtons.length - 1
+      : (currentIndex + (event.key === 'ArrowDown' ? 1 : -1) + optionButtons.length) % optionButtons.length;
+    optionButtons[nextIndex]?.focus();
+  });
+  panel.addEventListener('pointerdown', event => {
+    const dragRegion = event.target.closest(dragHandleSelector);
+    const interactiveTarget = event.target.closest('button, a, input, select, textarea, [role="button"]');
+    if (!dragRegion || interactiveTarget || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    event.preventDefault();
+    dragState = {
+      pointerId:event.pointerId,
+      startY:event.clientY,
+      lastY:event.clientY,
+      lastTime:event.timeStamp,
+      dragY:0,
+      velocity:0
+    };
+    panel.classList.add('is-dragging');
+    panel.setPointerCapture?.(event.pointerId);
+  });
+  panel.addEventListener('pointermove', event => {
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const dragY = Math.max(0, event.clientY - dragState.startY);
+    const elapsed = Math.max(1, event.timeStamp - dragState.lastTime);
+    dragState.velocity = Math.max(0, (event.clientY - dragState.lastY) / elapsed);
+    dragState.lastY = event.clientY;
+    dragState.lastTime = event.timeStamp;
+    dragState.dragY = dragY;
+    panel.style.setProperty('--sheet-drag-y', `${dragY}px`);
+  });
+  panel.addEventListener('pointerup', event => {
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    dragState.dragY = Math.max(dragState.dragY, event.clientY - dragState.startY, 0);
+    const releaseVelocity = event.timeStamp - dragState.lastTime <= 80 ? dragState.velocity : 0;
+    const shouldClose = dragState.dragY > dragCloseDistance || releaseVelocity > dragCloseVelocity;
+    if (panel.hasPointerCapture?.(event.pointerId)) panel.releasePointerCapture(event.pointerId);
+    if (shouldClose) close(true, { preserveDrag:true });
+    else resetDrag(true);
+  });
+  panel.addEventListener('pointercancel', event => {
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    if (panel.hasPointerCapture?.(event.pointerId)) panel.releasePointerCapture(event.pointerId);
+    resetDrag(true);
+  });
+  $(`#${closeId}`).addEventListener('click', () => close(true));
+  $(`#${backdropId}`).addEventListener('click', () => close(true));
+
+  return { close, isOpen:() => activeKey !== null, setOptions, sync };
+}
+
+const accountPicker = createAccountPicker({
+  dialogId:'accountPickerDialog',
+  titleId:'accountPickerTitle',
+  listId:'accountPickerOptions',
+  closeId:'closeAccountPicker',
+  backdropId:'accountPickerBackdrop',
+  pickers:[
+    { key:'source', selectId:'sourceAccount', triggerId:'sourceAccountTrigger', title:'选择账户', options:kind => entryAccounts(kind) },
+    { key:'target', selectId:'targetAccount', triggerId:'targetAccountTrigger', title:'选择转入账户', options:() => assetAccounts() },
+    { key:'repayment', selectId:'repaymentSourceAccount', triggerId:'repaymentSourceAccountTrigger', title:'选择付款账户', options:() => assetAccounts() },
+    { key:'newItem', selectId:'newItemAccount', triggerId:'newItemAccountTrigger', title:'选择付款账户', options:() => itemPaymentAccounts() },
+    { key:'payment', selectId:'paymentAccount', triggerId:'paymentAccountTrigger', title:'选择付款账户', options:() => itemPaymentAccounts() }
+  ]
+});
+
+for (const dialogId of ['entryDialog', 'repaymentDialog', 'newItemDialog', 'paymentDialog']) {
+  $(`#${dialogId}`).addEventListener('close', () => accountPicker.close());
+}
+
 function populateEntryAccounts(kind, sourceId = null, targetId = null) {
-  $('#sourceAccount').innerHTML = accountOptions(entryAccounts(kind));
-  $('#targetAccount').innerHTML = accountOptions(assetAccounts());
-  if (sourceId && entryAccounts(kind).some(account => account.id === sourceId)) $('#sourceAccount').value = sourceId;
-  if (targetId && assetAccounts().some(account => account.id === targetId)) $('#targetAccount').value = targetId;
+  accountPicker.setOptions('source', kind, sourceId);
+  accountPicker.setOptions('target', null, targetId);
 }
 
 function populateAccounts() {
   const kind = document.querySelector('input[name="kind"]:checked')?.value ?? 'expense';
   populateEntryAccounts(kind);
-  const itemOptions = accountOptions(itemPaymentAccounts());
-  $('#newItemAccount').innerHTML = itemOptions;
-  $('#paymentAccount').innerHTML = itemOptions;
-  $('#repaymentSourceAccount').innerHTML = accountOptions(assetAccounts());
+  accountPicker.setOptions('repayment', null);
+  accountPicker.setOptions('newItem', null);
+  accountPicker.setOptions('payment', null);
 }
 
 function selectCategory(value = '', focusCustom = false) {
@@ -1347,6 +1705,7 @@ function updateKindState() {
   const transfer = kind === 'transfer';
   $('#targetRow').hidden = !transfer;
   $('#categoryRow').hidden = transfer;
+  accountPicker.close();
   populateEntryAccounts(kind, $('#sourceAccount').value, $('#targetAccount').value);
 }
 
@@ -1373,6 +1732,7 @@ function openEntry(id = null) {
 
   pendingOperationId = uid(entry ? 'edit' : 'op');
   saveLocked = false;
+  accountPicker.close();
   $('#saveEntryButton').disabled = false;
   $('#entryMessage').textContent = '';
   $('#entryForm').reset();
@@ -1387,6 +1747,8 @@ function openEntry(id = null) {
     $('#amountInput').value = senToAmount(entry.amountMinor);
     $('#sourceAccount').value = entry.accountId;
     $('#targetAccount').value = entry.targetAccountId || '';
+    accountPicker.sync('source');
+    accountPicker.sync('target');
     selectCategory(entry.category || '');
     $('#noteInput').value = entry.note || '';
     $('#dateInput').value = entry.occurredAt.slice(0, 10);
@@ -1398,8 +1760,7 @@ function openEntry(id = null) {
     $('#dateInput').value = today();
   }
 
-  showDialog($('#entryDialog'));
-  setTimeout(() => $('#amountInput').focus(), 30);
+  showDialog($('#entryDialog'), () => $('#amountInput').focus());
 }
 
 function renderAccountPhotoPreview() {
@@ -1527,8 +1888,7 @@ function openAccount(id = null) {
   $('#scheduledPayment').value = account?.scheduledPaymentMinor ? senToAmount(account.scheduledPaymentMinor) : '';
   $('#expectedPayoffDate').value = account?.expectedPayoffDate ?? '';
   updateAccountSubtypeFields();
-  showDialog($('#accountDialog'));
-  setTimeout(() => $('#accountName').focus(), 30);
+  showDialog($('#accountDialog'), () => $('#accountName').focus());
 }
 
 async function restoreDeletedItemFromRecycle(itemId, button) {
@@ -1677,7 +2037,8 @@ function handleWalletUpdateMessage(event) {
 }
 
 function requestDialogClose(dialog) {
-  if (dialog?.id === 'itemDetailDialog') closeItemDetail();
+  if (dialog?.id === 'accountPickerDialog') accountPicker.close(true);
+  else if (dialog?.id === 'itemDetailDialog') closeItemDetail();
   else if (dialog?.id === 'receiptViewerDialog') closeReceiptViewer();
   else if (dialog?.id === 'repaymentDialog') closeRepayment({ returnToDetail:true });
   else dismissDialog(dialog);
@@ -1696,8 +2057,13 @@ document.querySelectorAll('dialog').forEach(dialog => {
   dialog.addEventListener('close', applyPendingWalletUpdate);
 });
 $('#moreButton').addEventListener('click', () => {
-  $('#settingsMessage').textContent = '';
-  showDialog($('#settingsDialog'));
+  showDialog($('#topbarActionsDialog'));
+});
+$('#openSettingsButton').addEventListener('click', () => {
+  dismissDialog($('#topbarActionsDialog'), () => {
+    $('#settingsMessage').textContent = '';
+    showDialog($('#settingsDialog'));
+  });
 });
 $('#syncBadge').addEventListener('click', () => {
   if (runtimeMode === 'local') {
@@ -1728,6 +2094,59 @@ document.querySelectorAll('input[name="itemsFilter"]').forEach(input => input.ad
 }));
 $('#newItemDepositAmount').addEventListener('input', updateNewItemDepositControls);
 $('#newItemLinked').addEventListener('change', updateNewItemDepositControls);
+$('#newItemCover').addEventListener('change', event => {
+  const file = event.target.files?.[0] ?? null;
+  clearPendingNewItemMedia('cover');
+  updateNewItemUploadRow('cover', file);
+  $('#newItemCoverStatus').textContent = file ? '将在保存时按当前预览压缩为 JPEG' : '选择后可保留完整图片或自定义 4:5 裁切';
+  loadNewItemCoverPreview(file);
+});
+$('#newItemReceipt').addEventListener('change', event => {
+  const file = event.target.files?.[0] ?? null;
+  clearPendingNewItemMedia('receipt');
+  updateNewItemUploadRow('receipt', file);
+  $('#newItemReceiptStatus').textContent = file ? '将在保存订金时压缩为 JPEG' : '仅在保存订金时读取并压缩';
+});
+$('#removeNewItemCover').addEventListener('click', () => {
+  $('#newItemCover').value = '';
+  clearPendingNewItemMedia('cover');
+  updateNewItemUploadRow('cover');
+  resetNewItemCoverEditor();
+  $('#newItemCoverStatus').textContent = '选择后可保留完整图片或自定义 4:5 裁切';
+});
+$('#removeNewItemReceipt').addEventListener('click', () => {
+  $('#newItemReceipt').value = '';
+  clearPendingNewItemMedia('receipt');
+  updateNewItemUploadRow('receipt');
+  $('#newItemReceiptStatus').textContent = '仅在保存订金时读取并压缩';
+});
+document.querySelectorAll('input[name="newItemCoverMode"]').forEach(input => input.addEventListener('change', event => {
+  setNewItemCoverEdit({ mode:event.target.value, zoom:newItemCoverEdit.zoom, offsetX:newItemCoverEdit.offsetX, offsetY:newItemCoverEdit.offsetY });
+}));
+$('#newItemCoverZoom').addEventListener('input', event => setNewItemCoverEdit({ zoom:Number(event.target.value) }));
+$('#resetNewItemCoverCrop').addEventListener('click', () => setNewItemCoverEdit({ zoom:1, offsetX:0, offsetY:0 }));
+let newItemCoverDrag = null;
+$('#newItemCoverViewport').addEventListener('pointerdown', event => {
+  if (newItemCoverEdit.mode !== 'crop' || (event.pointerType === 'mouse' && event.button !== 0)) return;
+  event.preventDefault();
+  newItemCoverDrag = { pointerId:event.pointerId, x:event.clientX, y:event.clientY, offsetX:newItemCoverEdit.offsetX, offsetY:newItemCoverEdit.offsetY };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+});
+$('#newItemCoverViewport').addEventListener('pointermove', event => {
+  if (!newItemCoverDrag || newItemCoverDrag.pointerId !== event.pointerId) return;
+  event.preventDefault();
+  const viewport = event.currentTarget;
+  setNewItemCoverEdit({
+    offsetX:newItemCoverDrag.offsetX + ((event.clientX - newItemCoverDrag.x) * 400 / Math.max(1, viewport.clientWidth)),
+    offsetY:newItemCoverDrag.offsetY + ((event.clientY - newItemCoverDrag.y) * 500 / Math.max(1, viewport.clientHeight))
+  });
+});
+const finishNewItemCoverDrag = event => {
+  if (newItemCoverDrag?.pointerId === event.pointerId) newItemCoverDrag = null;
+};
+$('#newItemCoverViewport').addEventListener('pointerup', finishNewItemCoverDrag);
+$('#newItemCoverViewport').addEventListener('pointercancel', finishNewItemCoverDrag);
+window.addEventListener('resize', renderNewItemCoverEditor);
 $('#paymentLinked').addEventListener('change', updatePaymentAccountRow);
 $('#payItemFullButton').addEventListener('click', () => openPaymentDialog(true));
 $('#payItemPartButton').addEventListener('click', () => openPaymentDialog(false));
@@ -1772,7 +2191,7 @@ $('#newItemForm').addEventListener('submit', async event => {
     const linked = hasDeposit && $('#newItemLinked').checked;
     const accountId = linked ? $('#newItemAccount').value : null;
     if (linked && !accountId) throw new Error('请选择付款账户，或关闭账目联动');
-    const cover = await prepareFormMedia($('#newItemCover'), 'cover', pendingItemCreate, 'cover', $('#newItemCoverStatus'));
+    const cover = await prepareFormMedia($('#newItemCover'), 'cover', pendingItemCreate, 'cover', $('#newItemCoverStatus'), currentNewItemCoverRenderPlan());
     const receipt = hasDeposit
       ? await prepareFormMedia($('#newItemReceipt'), 'receipt', pendingItemCreate, 'receipt', $('#newItemReceiptStatus'))
       : null;
@@ -2268,7 +2687,7 @@ async function handleCloudUser(user) {
   stopItemListeners();
   if ($('#itemDetailDialog').open) {
     cleanupItemDetail();
-    $('#itemDetailDialog').close();
+    dismissDialog($('#itemDetailDialog'));
   }
   stopUserWatch = stopInviteWatch = stopHouseholdWatch = null;
   currentHousehold = null;
@@ -2355,10 +2774,14 @@ $('#signOutButton').addEventListener('click', () => {
 $('#workspaceSelect').addEventListener('change', event => {
   if (cloudUser && event.target.value) switchCloudHousehold(event.target.value, { persistSelection:true });
 });
-$('#inviteMemberButton').addEventListener('click', () => {
+function openInviteDialog() {
   $('#inviteForm').reset();
   $('#inviteMessage').textContent = '';
   showDialog($('#inviteDialog'));
+}
+$('#inviteMemberButton').addEventListener('click', () => {
+  if ($('#topbarActionsDialog').open) dismissDialog($('#topbarActionsDialog'), openInviteDialog);
+  else openInviteDialog();
 });
 $('#inviteForm').addEventListener('submit', async event => {
   event.preventDefault();

@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  COVER_RENDER_MODES,
   MEDIA_LIMITS,
   compressItemMedia,
+  normaliseCoverEditState,
   normaliseMediaDataUrl,
+  planCoverRender,
   planMediaDimensions
 } from './item-media.js';
 
@@ -69,6 +72,53 @@ test('cover 对横图和竖图做居中正方形裁切并限制约 512px', () =>
     width: 512,
     height: 512
   });
+});
+
+test('完整封面把横图与竖图 contain 到 4:5 画布且不裁掉内容', () => {
+  const landscape = planCoverRender(1600, 900, { mode:COVER_RENDER_MODES.FULL });
+  assert.deepEqual(
+    { sourceX:landscape.sourceX, sourceY:landscape.sourceY, sourceWidth:landscape.sourceWidth, sourceHeight:landscape.sourceHeight },
+    { sourceX:0, sourceY:0, sourceWidth:1600, sourceHeight:900 }
+  );
+  assert.deepEqual(
+    { x:landscape.destinationX, y:landscape.destinationY, width:landscape.destinationWidth, height:landscape.destinationHeight, output:[landscape.width, landscape.height] },
+    { x:0, y:137.5, width:400, height:225, output:[400, 500] }
+  );
+
+  const portrait = planCoverRender(800, 1200, { mode:COVER_RENDER_MODES.FULL });
+  assert.equal(portrait.sourceWidth, 800);
+  assert.equal(portrait.sourceHeight, 1200);
+  assert.ok(Math.abs(portrait.destinationX - (100 / 3)) < 1e-9);
+  assert.ok(Math.abs(portrait.destinationWidth - (1000 / 3)) < 1e-9);
+  assert.deepEqual({ y:portrait.destinationY, height:portrait.destinationHeight, output:[portrait.width, portrait.height] }, { y:0, height:500, output:[400, 500] });
+  assert.equal(portrait.background, '#f3f7f6');
+});
+
+test('4:5 裁切初始居中、拖动受边界限制且 zoom 缩小来源窗口', () => {
+  const landscape = planCoverRender(1600, 900, { mode:COVER_RENDER_MODES.CROP, zoom:1, offsetX:0, offsetY:0 });
+  assert.deepEqual(
+    { x:landscape.sourceX, y:landscape.sourceY, width:landscape.sourceWidth, height:landscape.sourceHeight, output:[landscape.width, landscape.height] },
+    { x:440, y:0, width:720, height:900, output:[400, 500] }
+  );
+
+  const rightEdge = normaliseCoverEditState(1600, 900, { mode:'crop', zoom:1, offsetX:99_999, offsetY:99_999 });
+  assert.equal(rightEdge.offsetX, rightEdge.maxOffsetX);
+  assert.equal(rightEdge.offsetY, 0);
+  const rightEdgePlan = planCoverRender(1600, 900, rightEdge);
+  assert.equal(rightEdgePlan.sourceX, 0);
+  assert.equal(rightEdgePlan.sourceY, 0);
+
+  const zoomed = planCoverRender(1600, 900, { mode:'crop', zoom:2, offsetX:0, offsetY:0 });
+  assert.deepEqual(
+    { x:zoomed.sourceX, y:zoomed.sourceY, width:zoomed.sourceWidth, height:zoomed.sourceHeight, output:[zoomed.width, zoomed.height] },
+    { x:620, y:225, width:360, height:450, output:[400, 500] }
+  );
+
+  const portrait = planCoverRender(800, 1200, { mode:'crop' });
+  assert.deepEqual(
+    { x:portrait.sourceX, y:portrait.sourceY, width:portrait.sourceWidth, height:portrait.sourceHeight, output:[portrait.width, portrait.height] },
+    { x:0, y:100, width:800, height:1000, output:[400, 500] }
+  );
 });
 
 test('receipt 保持横竖比例且最长边不超过 1280px', () => {

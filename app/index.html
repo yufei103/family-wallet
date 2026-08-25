@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f3f7f6">
   <meta name="description" content="可由家人共同使用的私人家庭账本">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Family Wallet">
   <script>try{document.documentElement.dataset.theme=localStorage.getItem('family-wallet-v2-theme')||'teal'}catch{document.documentElement.dataset.theme='teal'}</script>
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="stylesheet" href="./styles.css">
@@ -37,12 +40,11 @@
       <div class="topbar-copy">
         <p class="app-name">Family Wallet</p>
         <h1 id="viewTitle">概览</h1>
+        <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；已同步时点按可刷新 App">准备中</button>
       </div>
       <div class="topbar-actions">
         <select class="workspace-select" id="workspaceSelect" aria-label="选择个人或家庭账本"></select>
-        <button class="icon-button" id="inviteMemberButton" type="button" aria-label="邀请家庭成员" title="邀请家庭成员">＋</button>
-        <button class="icon-button more-button" id="moreButton" type="button" aria-label="设置与数据" title="设置与数据">⋯</button>
-        <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；已同步时点按可刷新App">准备中</button>
+        <button class="icon-button more-button" id="moreButton" type="button" aria-label="打开更多操作" aria-haspopup="dialog" aria-controls="topbarActionsDialog" title="更多操作">⋯</button>
       </div>
     </header>
 
@@ -168,7 +170,7 @@
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg>
       <span>账户</span>
     </button>
-    <button class="quick-add" id="newEntryButton" type="button" aria-label="新增账目">
+    <button class="nav-item quick-add" id="newEntryButton" type="button" aria-label="新增账目">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
     </button>
     <button class="nav-item" data-view-target="entries" type="button">
@@ -181,9 +183,20 @@
     </button>
   </nav>
 
+  <dialog class="topbar-actions-dialog" id="topbarActionsDialog" aria-labelledby="topbarActionsTitle">
+    <button class="topbar-actions-backdrop" type="button" aria-label="关闭更多操作" data-close-dialog="topbarActionsDialog"></button>
+    <section class="topbar-actions-panel">
+      <h2 id="topbarActionsTitle">更多操作</h2>
+      <div class="topbar-action-group">
+        <button id="inviteMemberButton" type="button" hidden>邀请家人</button>
+        <button id="openSettingsButton" type="button">设置与数据</button>
+      </div>
+      <button class="topbar-actions-cancel" type="button" data-close-dialog="topbarActionsDialog">取消</button>
+    </section>
+  </dialog>
+
   <dialog id="entryDialog" class="sheet">
     <form method="dialog" id="entryForm">
-      <div class="sheet-handle" aria-hidden="true"></div>
       <div class="sheet-head">
         <div><p class="sheet-context">快速记账</p><h2 id="entryDialogTitle">新增账目</h2></div>
         <button class="icon-button" type="button" data-close-dialog="entryDialog" aria-label="关闭">×</button>
@@ -195,8 +208,20 @@
         <label><input type="radio" name="kind" value="transfer"><span>转账</span></label>
       </fieldset>
       <label class="field amount-field"><span>金额</span><div class="amount-input"><b>RM</b><input id="amountInput" name="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" required></div></label>
-      <label class="field"><span>账户</span><select id="sourceAccount" name="accountId" required></select></label>
-      <label class="field" id="targetRow" hidden><span>转入账户</span><select id="targetAccount" name="targetAccountId"></select></label>
+      <div class="field business-account-field" id="sourceRow">
+        <span id="sourceAccountLabel">账户</span>
+        <select id="sourceAccount" name="accountId" required hidden tabindex="-1"></select>
+        <button class="account-picker-trigger" id="sourceAccountTrigger" type="button" aria-labelledby="sourceAccountLabel sourceAccountName sourceAccountType sourceAccountAmount" aria-haspopup="listbox" aria-expanded="false" aria-controls="accountPickerOptions">
+          <span class="account-picker-name" id="sourceAccountName"></span><span class="account-picker-type" id="sourceAccountType"></span><span class="account-picker-amount" id="sourceAccountAmount"></span>
+        </button>
+      </div>
+      <div class="field business-account-field" id="targetRow" hidden>
+        <span id="targetAccountLabel">转入账户</span>
+        <select id="targetAccount" name="targetAccountId" hidden tabindex="-1"></select>
+        <button class="account-picker-trigger" id="targetAccountTrigger" type="button" aria-labelledby="targetAccountLabel targetAccountName targetAccountType targetAccountAmount" aria-haspopup="listbox" aria-expanded="false" aria-controls="accountPickerOptions">
+          <span class="account-picker-name" id="targetAccountName"></span><span class="account-picker-type" id="targetAccountType"></span><span class="account-picker-amount" id="targetAccountAmount"></span>
+        </button>
+      </div>
       <div class="category-field" id="categoryRow">
         <span class="field-label">分类</span>
         <div class="category-chip-grid" id="categoryChipGrid" role="radiogroup" aria-label="快速选择分类">
@@ -214,7 +239,7 @@
         <label class="field custom-category-field" id="customCategoryField" hidden><span>其它分类</span><input id="customCategoryInput" maxlength="40" placeholder="输入自定义分类"></label>
       </div>
       <label class="field"><span>备注（可选）</span><input id="noteInput" name="note" maxlength="100" placeholder="这笔钱用在哪里？"></label>
-      <label class="field"><span>日期</span><input id="dateInput" name="occurredAt" type="date" required></label>
+      <label class="field"><span>日期</span><span class="date-input-shell"><input id="dateInput" name="occurredAt" type="date" required></span></label>
       <p class="form-message" id="entryMessage" aria-live="polite"></p>
       <div class="sheet-actions">
         <button class="primary-button" id="saveEntryButton" type="submit">保存账目</button>
@@ -225,7 +250,6 @@
 
   <dialog id="accountDetailDialog" class="sheet account-detail-sheet">
     <div>
-      <div class="sheet-handle" aria-hidden="true"></div>
       <div class="sheet-head">
         <div><p class="sheet-context">账户明细</p><h2 id="accountDetailName">账户</h2></div>
         <button class="icon-button" type="button" data-close-dialog="accountDetailDialog" aria-label="关闭">×</button>
@@ -254,7 +278,6 @@
 
   <dialog id="accountDialog" class="sheet">
     <form method="dialog" id="accountForm">
-      <div class="sheet-handle" aria-hidden="true"></div>
       <div class="sheet-head">
         <div><p class="sheet-context">账户设置</p><h2 id="accountDialogTitle">新增账户</h2></div>
         <button class="icon-button" type="button" data-close-dialog="accountDialog" aria-label="关闭">×</button>
@@ -293,7 +316,7 @@
         <label class="field" id="annualInterestRateRow" hidden><span>目前年利率（%）</span><input id="annualInterestRate" inputmode="decimal" placeholder="例如：4.20"><small>用于估算本月利息；银行实际日息可能有少许差异。</small></label>
         <label class="field"><span id="originalPrincipalLabel">原始融资额（RM，可选）</span><input id="originalPrincipal" inputmode="decimal" placeholder="0.00"></label>
         <label class="field"><span id="scheduledPaymentLabel">每月固定还款（RM，可选）</span><input id="scheduledPayment" inputmode="decimal" placeholder="例如：1199.00"><small id="scheduledPaymentHelp">记录还款时会自动填入这个金额，仍可修改。</small></label>
-        <label class="field"><span>预计还清日期（可选）</span><input id="expectedPayoffDate" type="date"></label>
+        <label class="field"><span>预计还清日期（可选）</span><span class="date-input-shell"><input id="expectedPayoffDate" type="date"></span></label>
       </div>
       <label class="field" id="openingBalanceRow"><span id="openingBalanceLabel">当前余额（RM）</span><input id="openingBalance" inputmode="decimal" value="0.00" required></label>
       <label class="switch-row"><span><b>计入家庭净额</b><small>关闭后保留历史，但不计入首页总额</small></span><input id="includeInTotal" type="checkbox" checked></label>
@@ -313,21 +336,30 @@
       </div>
       <p class="sheet-description" id="repaymentBalanceCopy">从可用资金还款会同时减少现金和负债，不会重复记一笔支出。</p>
       <div class="repayment-amount-panel">
-        <label class="field amount-field"><span id="repaymentAmountLabel">本次还款总额</span><div class="amount-input"><b>RM</b><input id="repaymentAmount" inputmode="decimal" placeholder="0.00"></div></label>
-        <button class="text-button repayment-full-button" id="repaymentFullButton" type="button">改为一次还清</button>
+        <div class="field amount-field">
+          <div class="repayment-amount-title-row"><label id="repaymentAmountLabel" for="repaymentAmount">本次还款总额</label><button class="repayment-full-button" id="repaymentFullButton" type="button">填入全部欠款</button></div>
+          <div class="amount-input"><b>RM</b><input id="repaymentAmount" inputmode="decimal" placeholder="0.00"></div>
+        </div>
       </div>
       <label class="field" id="repaymentInterestRow" hidden><span>本期利息估算（RM）</span><input id="repaymentInterest" inputmode="decimal" placeholder="0.00"><small>根据目前欠款和年利率估算；可按银行实际金额调整。</small></label>
       <div class="repayment-breakdown" id="repaymentBreakdown" hidden>
         <span>减少本金／欠款<b id="repaymentPrincipalPreview">RM 0.00</b></span>
         <span id="repaymentInterestPreviewRow">本期利息<b id="repaymentInterestPreview">RM 0.00</b></span>
       </div>
-      <fieldset class="segmented repayment-funding-control">
-        <legend>还款资金来源</legend>
+      <span class="field-label repayment-funding-label" id="repaymentFundingLabel">还款资金来源</span>
+      <fieldset class="segmented repayment-funding-control" aria-labelledby="repaymentFundingLabel">
         <label><input type="radio" name="repaymentFunding" value="asset" checked><span>可用资金账户</span></label>
         <label><input type="radio" name="repaymentFunding" value="off_ledger"><span>账外资金</span></label>
       </fieldset>
-      <label class="field" id="repaymentSourceRow"><span>付款账户</span><select id="repaymentSourceAccount" required></select><small>选择后会减少此账户现金，同时降低负债。</small></label>
-      <label class="field"><span>还款日期</span><input id="repaymentDate" type="date" required></label>
+      <div class="field business-account-field" id="repaymentSourceRow">
+        <span id="repaymentSourceAccountLabel">付款账户</span>
+        <select id="repaymentSourceAccount" required hidden tabindex="-1"></select>
+        <button class="account-picker-trigger" id="repaymentSourceAccountTrigger" type="button" aria-labelledby="repaymentSourceAccountLabel repaymentSourceAccountName repaymentSourceAccountType repaymentSourceAccountAmount" aria-haspopup="listbox" aria-expanded="false" aria-controls="accountPickerOptions">
+          <span class="account-picker-name" id="repaymentSourceAccountName"></span><span class="account-picker-type" id="repaymentSourceAccountType"></span><span class="account-picker-amount" id="repaymentSourceAccountAmount"></span>
+        </button>
+        <small>选择后会减少此账户现金，同时降低负债。</small>
+      </div>
+      <label class="field"><span>还款日期</span><span class="date-input-shell"><input id="repaymentDate" type="date" required></span></label>
       <label class="field"><span>备注（可选）</span><input id="repaymentNote" maxlength="100" placeholder="例如：本月信用卡还款"></label>
       <p class="form-message" id="repaymentMessage" aria-live="polite"></p>
       <button class="primary-button" id="saveRepaymentButton" type="submit">保存还款</button>
@@ -336,7 +368,6 @@
 
   <dialog id="monthDialog" class="sheet compact-sheet">
     <form method="dialog" id="monthForm">
-      <div class="sheet-handle" aria-hidden="true"></div>
       <div class="sheet-head">
         <div><p class="sheet-context">账目筛选</p><h2>选择月份</h2></div>
         <button class="icon-button" type="button" data-close-dialog="monthDialog" aria-label="关闭">×</button>
@@ -348,7 +379,6 @@
 
   <dialog id="inviteDialog" class="sheet compact-sheet">
     <form method="dialog" id="inviteForm">
-      <div class="sheet-handle" aria-hidden="true"></div>
       <div class="sheet-head">
         <div><p class="sheet-context">家庭共享</p><h2>邀请家人</h2></div>
         <button class="icon-button" type="button" data-close-dialog="inviteDialog" aria-label="关闭">×</button>
@@ -362,7 +392,6 @@
 
   <dialog id="recycleDialog" class="sheet">
     <div>
-      <div class="sheet-handle" aria-hidden="true"></div>
       <div class="sheet-head">
         <div><p class="sheet-context">安全恢复</p><h2>回收站</h2></div>
         <button class="icon-button" id="closeRecycleButton" type="button" aria-label="关闭">×</button>
@@ -402,18 +431,52 @@
       </div>
       <label class="field"><span>物品名称</span><input id="newItemName" name="name" maxlength="80" required placeholder="例如：相机、沙发"></label>
       <label class="field"><span>全价（RM）</span><input id="newItemFullPrice" name="fullPrice" inputmode="decimal" required placeholder="0.00"></label>
-      <label class="field"><span>预计到货日期（可选）</span><input id="newItemEtaDate" name="etaDate" type="date"></label>
+      <label class="field"><span>预计到货日期（可选）</span><span class="date-input-shell"><input id="newItemEtaDate" name="etaDate" type="date"></span></label>
       <label class="field"><span>备注（可选）</span><textarea id="newItemNote" name="note" maxlength="240" placeholder="型号、颜色或购买计划"></textarea></label>
-      <label class="field file-field"><span>封面（可选）</span><input id="newItemCover" type="file" accept="image/jpeg,image/png,image/webp"><small id="newItemCoverStatus">浏览器内压缩为独立 JPEG 资料</small></label>
+      <div class="field file-field new-item-upload" id="newItemCoverField">
+        <span id="newItemCoverLabel">封面（可选）</span>
+        <input class="visually-hidden-file" id="newItemCover" type="file" accept="image/jpeg,image/png,image/webp" aria-labelledby="newItemCoverLabel newItemCoverFileName">
+        <div class="file-upload-row">
+          <label class="file-upload-button" id="newItemCoverChoose" for="newItemCover">选择照片</label>
+          <span class="file-upload-name" id="newItemCoverFileName">未选择照片</span>
+          <button class="file-upload-remove" id="removeNewItemCover" type="button" hidden>移除</button>
+        </div>
+        <small id="newItemCoverStatus">选择后可保留完整图片或自定义 4:5 裁切</small>
+      </div>
+      <section class="cover-editor" id="newItemCoverEditor" aria-labelledby="newItemCoverEditorTitle" hidden>
+        <div class="cover-editor-head"><h3 id="newItemCoverEditorTitle">调整封面</h3><button class="text-button" id="resetNewItemCoverCrop" type="button">重置</button></div>
+        <fieldset class="segmented cover-mode-control">
+          <label><input type="radio" name="newItemCoverMode" value="full" checked><span>完整图片</span></label>
+          <label><input type="radio" name="newItemCoverMode" value="crop"><span>4:5 裁切</span></label>
+        </fieldset>
+        <div class="cover-editor-viewport" id="newItemCoverViewport"><img id="newItemCoverPreview" alt="封面裁切预览" draggable="false"></div>
+        <label class="cover-zoom-control" id="newItemCoverZoomRow" hidden><span>缩放</span><input id="newItemCoverZoom" type="range" min="1" max="3" step="0.05" value="1"></label>
+        <p id="newItemCoverCropHelp">完整图片会放入 4:5 画布，不会裁掉内容。</p>
+      </section>
       <div class="deposit-panel">
         <h3>订金（可选）</h3>
         <label class="field"><span>金额（RM）</span><input id="newItemDepositAmount" inputmode="decimal" placeholder="0.00"></label>
-        <label class="field"><span>日期</span><input id="newItemDepositDate" type="date"></label>
+        <label class="field"><span>日期</span><span class="date-input-shell"><input id="newItemDepositDate" type="date"></span></label>
         <label class="field"><span>订金备注</span><input id="newItemDepositNote" maxlength="100"></label>
-        <label class="field file-field"><span>订金凭证（可选）</span><input id="newItemReceipt" type="file" accept="image/jpeg,image/png,image/webp"><small id="newItemReceiptStatus">仅在请求时读取</small></label>
+        <div class="field file-field new-item-upload" id="newItemReceiptField">
+          <span id="newItemReceiptLabel">订金凭证（可选）</span>
+          <input class="visually-hidden-file" id="newItemReceipt" type="file" accept="image/jpeg,image/png,image/webp" aria-labelledby="newItemReceiptLabel newItemReceiptFileName">
+          <div class="file-upload-row">
+            <label class="file-upload-button" id="newItemReceiptChoose" for="newItemReceipt">选择凭证</label>
+            <span class="file-upload-name" id="newItemReceiptFileName">未选择凭证</span>
+            <button class="file-upload-remove" id="removeNewItemReceipt" type="button" hidden>移除</button>
+          </div>
+          <small id="newItemReceiptStatus">仅在保存订金时读取并压缩</small>
+        </div>
         <div id="newItemLinkControls" hidden>
           <label class="switch-row"><span><b>同时记入账目</b><small>默认开启；关闭后为独立付款，不影响账户余额</small></span><input id="newItemLinked" type="checkbox" checked></label>
-          <label class="field" id="newItemAccountRow"><span>付款账户</span><select id="newItemAccount"></select></label>
+          <div class="field business-account-field" id="newItemAccountRow">
+            <span id="newItemAccountLabel">付款账户</span>
+            <select id="newItemAccount" hidden tabindex="-1"></select>
+            <button class="account-picker-trigger" id="newItemAccountTrigger" type="button" aria-labelledby="newItemAccountLabel newItemAccountName newItemAccountType newItemAccountAmount" aria-haspopup="listbox" aria-expanded="false" aria-controls="accountPickerOptions">
+              <span class="account-picker-name" id="newItemAccountName"></span><span class="account-picker-type" id="newItemAccountType"></span><span class="account-picker-amount" id="newItemAccountAmount"></span>
+            </button>
+          </div>
         </div>
       </div>
       <p class="form-message" id="newItemMessage" aria-live="polite"></p>
@@ -478,11 +541,17 @@
       </div>
       <p class="sheet-description" id="paymentBalanceCopy"></p>
       <label class="field"><span>金额（RM）</span><input id="paymentAmount" inputmode="decimal" required></label>
-      <label class="field"><span>日期</span><input id="paymentDate" type="date" required></label>
+      <label class="field"><span>日期</span><span class="date-input-shell"><input id="paymentDate" type="date" required></span></label>
       <label class="field"><span>备注（可选）</span><input id="paymentNote" maxlength="100"></label>
       <label class="field file-field"><span>凭证（可选）</span><input id="paymentReceipt" type="file" accept="image/jpeg,image/png,image/webp"><small id="paymentReceiptStatus">会压缩并独立保存</small></label>
       <label class="switch-row"><span><b>同时记入账目</b><small>关闭后为独立付款，不影响账户余额</small></span><input id="paymentLinked" type="checkbox" checked></label>
-      <label class="field" id="paymentAccountRow"><span>付款账户</span><select id="paymentAccount"></select></label>
+      <div class="field business-account-field" id="paymentAccountRow">
+        <span id="paymentAccountLabel">付款账户</span>
+        <select id="paymentAccount" hidden tabindex="-1"></select>
+        <button class="account-picker-trigger" id="paymentAccountTrigger" type="button" aria-labelledby="paymentAccountLabel paymentAccountName paymentAccountType paymentAccountAmount" aria-haspopup="listbox" aria-expanded="false" aria-controls="accountPickerOptions">
+          <span class="account-picker-name" id="paymentAccountName"></span><span class="account-picker-type" id="paymentAccountType"></span><span class="account-picker-amount" id="paymentAccountAmount"></span>
+        </button>
+      </div>
       <p class="form-message" id="paymentMessage" aria-live="polite"></p>
       <button class="primary-button" id="savePaymentButton" data-mutation type="submit">保存付款</button>
     </form>
@@ -496,13 +565,25 @@
       </div>
       <label class="field"><span>物品名称</span><input id="editItemName" maxlength="80" required></label>
       <label class="field"><span>全价（RM）</span><input id="editItemFullPrice" inputmode="decimal" required></label>
-      <label class="field"><span>预计到货日期（可选）</span><input id="editItemEtaDate" type="date"></label>
+      <label class="field"><span>预计到货日期（可选）</span><span class="date-input-shell"><input id="editItemEtaDate" type="date"></span></label>
       <label class="field"><span>备注（可选）</span><textarea id="editItemNote" maxlength="240"></textarea></label>
       <label class="field file-field"><span>替换封面（可选）</span><input id="editItemCover" type="file" accept="image/jpeg,image/png,image/webp"><small id="editItemCoverStatus">不选择会保留现有封面</small></label>
       <label class="switch-row"><span><b>移除现有封面</b><small>替换图片时会自动关闭</small></span><input id="editItemRemoveCover" type="checkbox"></label>
       <p class="form-message" id="editItemMessage" aria-live="polite"></p>
       <button class="primary-button" id="saveEditItemButton" data-mutation type="submit">保存修改</button>
     </form>
+  </dialog>
+
+  <dialog class="account-picker-dialog" id="accountPickerDialog" aria-labelledby="accountPickerTitle">
+    <button class="account-picker-backdrop" id="accountPickerBackdrop" type="button" tabindex="-1" aria-label="关闭账户选择"></button>
+    <section class="account-picker-panel">
+      <div class="account-picker-grabber" aria-hidden="true"><div class="account-picker-handle"></div></div>
+      <header class="account-picker-head">
+        <h3 id="accountPickerTitle">选择账户</h3>
+        <button class="icon-button" id="closeAccountPicker" type="button" aria-label="关闭账户选择">×</button>
+      </header>
+      <div class="account-picker-options" id="accountPickerOptions" role="listbox" aria-labelledby="accountPickerTitle"></div>
+    </section>
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

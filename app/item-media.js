@@ -3,11 +3,14 @@ const JPEG_PREFIX = 'data:image/jpeg;base64,';
 const JPEG_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const INPUT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const QUALITIES = Object.freeze([0.82, 0.72, 0.62, 0.52, 0.42]);
+const COVER_OUTPUT = Object.freeze({ width: 400, height: 500 });
 
 export const MEDIA_LIMITS = Object.freeze({
   cover: Object.freeze({ maxDataUrlLength: 80_000, maxLongEdge: 512, label: '封面图片' }),
   receipt: Object.freeze({ maxDataUrlLength: 180_000, maxLongEdge: 1280, label: '凭证图片' })
 });
+
+export const COVER_RENDER_MODES = Object.freeze({ FULL:'full', CROP:'crop' });
 
 function mediaLimit(kind) {
   const limit = MEDIA_LIMITS[kind];
@@ -102,12 +105,101 @@ export function planMediaDimensions(sourceWidth, sourceHeight, kind) {
   };
 }
 
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+/**
+ * Normalise interactive 4:5 crop state in output-canvas coordinates.
+ * Clamping guarantees every edge of the crop frame remains covered.
+ */
+export function normaliseCoverEditState(sourceWidth, sourceHeight, state = {}) {
+  if (!positiveDimension(sourceWidth) || !positiveDimension(sourceHeight)) throw new Error('图片尺寸无效');
+  const mode = state.mode === COVER_RENDER_MODES.CROP ? COVER_RENDER_MODES.CROP : COVER_RENDER_MODES.FULL;
+  const zoom = mode === COVER_RENDER_MODES.CROP ? clamp(Number(state.zoom) || 1, 1, 3) : 1;
+  if (mode === COVER_RENDER_MODES.FULL) return { mode, zoom, offsetX:0, offsetY:0, maxOffsetX:0, maxOffsetY:0 };
+
+  const baseScale = Math.max(COVER_OUTPUT.width / sourceWidth, COVER_OUTPUT.height / sourceHeight);
+  const renderedWidth = sourceWidth * baseScale * zoom;
+  const renderedHeight = sourceHeight * baseScale * zoom;
+  const maxOffsetX = Math.max(0, (renderedWidth - COVER_OUTPUT.width) / 2);
+  const maxOffsetY = Math.max(0, (renderedHeight - COVER_OUTPUT.height) / 2);
+  return {
+    mode,
+    zoom,
+    offsetX:clamp(Number(state.offsetX) || 0, -maxOffsetX, maxOffsetX),
+    offsetY:clamp(Number(state.offsetY) || 0, -maxOffsetY, maxOffsetY),
+    maxOffsetX,
+    maxOffsetY
+  };
+}
+
+/** Return a testable Canvas draw plan for a final 4:5 cover. */
+export function planCoverRender(sourceWidth, sourceHeight, state = {}) {
+  const edit = normaliseCoverEditState(sourceWidth, sourceHeight, state);
+  if (edit.mode === COVER_RENDER_MODES.FULL) {
+    const scale = Math.min(COVER_OUTPUT.width / sourceWidth, COVER_OUTPUT.height / sourceHeight);
+    const destinationWidth = sourceWidth * scale;
+    const destinationHeight = sourceHeight * scale;
+    return {
+      mode:edit.mode,
+      sourceX:0,
+      sourceY:0,
+      sourceWidth,
+      sourceHeight,
+      destinationX:(COVER_OUTPUT.width - destinationWidth) / 2,
+      destinationY:(COVER_OUTPUT.height - destinationHeight) / 2,
+      destinationWidth,
+      destinationHeight,
+      width:COVER_OUTPUT.width,
+      height:COVER_OUTPUT.height,
+      background:'#f3f7f6'
+    };
+  }
+
+  const scale = Math.max(COVER_OUTPUT.width / sourceWidth, COVER_OUTPUT.height / sourceHeight) * edit.zoom;
+  const cropWidth = COVER_OUTPUT.width / scale;
+  const cropHeight = COVER_OUTPUT.height / scale;
+  return {
+    mode:edit.mode,
+    sourceX:clamp(((sourceWidth - cropWidth) / 2) - (edit.offsetX / scale), 0, sourceWidth - cropWidth),
+    sourceY:clamp(((sourceHeight - cropHeight) / 2) - (edit.offsetY / scale), 0, sourceHeight - cropHeight),
+    sourceWidth:cropWidth,
+    sourceHeight:cropHeight,
+    destinationX:0,
+    destinationY:0,
+    destinationWidth:COVER_OUTPUT.width,
+    destinationHeight:COVER_OUTPUT.height,
+    width:COVER_OUTPUT.width,
+    height:COVER_OUTPUT.height
+  };
+}
+
+function scaledCoverPlan(initial, width, height) {
+  const scaleX = width / initial.width;
+  const scaleY = height / initial.height;
+  return {
+    ...initial,
+    width,
+    height,
+    destinationX:(initial.destinationX ?? 0) * scaleX,
+    destinationY:(initial.destinationY ?? 0) * scaleY,
+    destinationWidth:(initial.destinationWidth ?? initial.width) * scaleX,
+    destinationHeight:(initial.destinationHeight ?? initial.height) * scaleY
+  };
+}
+
 function candidatePlans(initial, kind) {
   if (kind === 'cover') {
-    const sizes = [512, 448, 384, 320, 256, 192]
-      .map(size => Math.min(initial.width, size))
+    const square = initial.width === initial.height;
+    const longEdge = Math.max(initial.width, initial.height);
+    const sizes = (square ? [512, 448, 384, 320, 256, 192] : [500, 450, 400, 350, 300, 250])
+      .map(size => Math.min(longEdge, size))
       .filter((size, index, values) => index === 0 || size !== values[index - 1]);
-    return sizes.map(size => ({ ...initial, width: size, height: size }));
+    return sizes.map(size => {
+      const scale = size / longEdge;
+      return scaledCoverPlan(initial, Math.max(1, Math.round(initial.width * scale)), Math.max(1, Math.round(initial.height * scale)));
+    });
   }
 
   const seen = new Set();
@@ -199,7 +291,9 @@ export async function compressItemMedia(file, kind, dependencies = {}) {
     const sourceWidth = decoded?.width ?? decoded?.naturalWidth;
     const sourceHeight = decoded?.height ?? decoded?.naturalHeight;
     const source = decoded?.source ?? decoded;
-    const initial = planMediaDimensions(sourceWidth, sourceHeight, kind);
+    const initial = kind === 'cover' && dependencies.renderPlan
+      ? planCoverRender(sourceWidth, sourceHeight, dependencies.renderPlan)
+      : planMediaDimensions(sourceWidth, sourceHeight, kind);
 
     for (const plan of candidatePlans(initial, kind)) {
       for (const quality of QUALITIES) {
@@ -209,8 +303,8 @@ export async function compressItemMedia(file, kind, dependencies = {}) {
         }
         const context = canvas.getContext('2d');
         if (!context || typeof context.drawImage !== 'function') throw new Error('Canvas 2D 不可用');
-        if ((sourceType === 'image/png' || sourceType === 'image/webp') && typeof context.fillRect === 'function') {
-          context.fillStyle = '#ffffff';
+        if ((plan.background || sourceType === 'image/png' || sourceType === 'image/webp') && typeof context.fillRect === 'function') {
+          context.fillStyle = plan.background || '#ffffff';
           context.fillRect(0, 0, plan.width, plan.height);
         }
         context.drawImage(
@@ -219,10 +313,10 @@ export async function compressItemMedia(file, kind, dependencies = {}) {
           plan.sourceY,
           plan.sourceWidth,
           plan.sourceHeight,
-          0,
-          0,
-          plan.width,
-          plan.height
+          plan.destinationX ?? 0,
+          plan.destinationY ?? 0,
+          plan.destinationWidth ?? plan.width,
+          plan.destinationHeight ?? plan.height
         );
         const dataUrl = canvas.toDataURL('image/jpeg', quality);
         const metadata = inspectJpegDataUrl(dataUrl);
