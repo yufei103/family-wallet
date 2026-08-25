@@ -43,7 +43,58 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-17/);
+  assert.match(worker, /family-wallet-v2-cloud-22/);
+});
+
+test('Apple/iPhone 壳层保留五项导航与中央圆形新增入口', async () => {
+  const [html, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+  assert.match(html, /<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">/);
+  assert.match(html, /<meta name="apple-mobile-web-app-capable" content="yes">/);
+  assert.match(html, /<meta name="apple-mobile-web-app-status-bar-style" content="default">/);
+  assert.match(html, /<meta name="apple-mobile-web-app-title" content="Family Wallet">/);
+
+  const nav = html.match(/<nav class="bottom-nav"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? '';
+  assert.deepEqual([...nav.matchAll(/data-view-target="([^"]+)"/g)].map(match => match[1]), ['overview', 'accounts', 'entries', 'items']);
+  assert.equal((nav.match(/data-view-target=/g) || []).length, 4);
+  assert.equal((nav.match(/<button\b/g) || []).length, 5);
+  const quickAdd = nav.match(/<button[^>]*id="newEntryButton"[^>]*>[\s\S]*?<\/button>/)?.[0] ?? '';
+  assert.match(quickAdd, /class="nav-item quick-add"/);
+  assert.match(quickAdd, /aria-label="新增账目"/);
+  assert.doesNotMatch(quickAdd, /data-view-target|<span>|新增账目<\/span>/);
+  assert.ok(nav.indexOf('id="accountsNav"') < nav.indexOf('id="newEntryButton"'));
+  assert.ok(nav.indexOf('id="newEntryButton"') < nav.indexOf('data-view-target="entries"'));
+  assert.doesNotMatch(html, /newEntryAccessory|new-entry-accessory/);
+  assert.match(styles, /\.bottom-nav\s*\{[^}]*grid-template-columns:\s*repeat\(5, minmax\(48px, 1fr\)\)/s);
+  assert.match(styles, /\.quick-add\s*\{[^}]*width:\s*54px[^}]*height:\s*54px[^}]*border-radius:\s*50%/s);
+  assert.match(styles, /\.workspace-select\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(styles, /\.topbar-actions \.icon-button\s*\{[^}]*width:\s*44px[^}]*min-height:\s*44px/s);
+
+  for (const token of ['placeholder-ink', 'nav-inactive', 'text-caption', 'text-label', 'text-body']) {
+    assert.match(styles, new RegExp(`--${token}:`));
+  }
+  assert.match(styles, /\.field input::placeholder(?:,\s*\.field textarea::placeholder)?\s*\{[^}]*color:\s*var\(--placeholder-ink\)/s);
+  assert.match(styles, /\.nav-item\s*\{[^}]*color:\s*var\(--nav-inactive\)/s);
+  assert.match(styles, /font-size:\s*var\(--text-(?:caption|label|body)\)/);
+});
+
+test('顶栏更多按钮打开 action sheet，再从菜单进入邀请或设置', async () => {
+  const [html, main] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8')]);
+  const moreTag = html.match(/<button[^>]*id="moreButton"[^>]*>/)?.[0] ?? '';
+  const actionsDialog = html.match(/<dialog[^>]*id="topbarActionsDialog"[^>]*>[\s\S]*?<\/dialog>/)?.[0] ?? '';
+  assert.match(moreTag, /aria-haspopup="dialog"/);
+  assert.match(moreTag, /aria-controls="topbarActionsDialog"/);
+  assert.doesNotMatch(moreTag, /onclick=/);
+  assert.match(actionsDialog, /class="topbar-actions-panel"/);
+  assert.match(actionsDialog, /id="inviteMemberButton"/);
+  assert.match(actionsDialog, /id="openSettingsButton"/);
+  assert.doesNotMatch(actionsDialog, /onclick=/);
+  assert.match(main, /\$\('#moreButton'\)\.addEventListener\('click', \(\) => \{\s*showDialog\(\$\('#topbarActionsDialog'\)\);/s);
+  assert.match(main, /\$\('#openSettingsButton'\)\.addEventListener\('click',[\s\S]*dismissDialog\(\$\('#topbarActionsDialog'\), \(\) => \{[\s\S]*showDialog\(\$\('#settingsDialog'\)\)/);
+  assert.match(main, /function openInviteDialog\(\)[\s\S]*showDialog\(\$\('#inviteDialog'\)\)/);
+  assert.match(main, /\$\('#inviteMemberButton'\)\.addEventListener\('click',[\s\S]*dismissDialog\(\$\('#topbarActionsDialog'\), openInviteDialog\)/);
+  assert.match(main, /inviteMemberButton'\)\.hidden = currentHousehold\.ownerId !== cloudUser\?\.uid/);
+  assert.match(main, /inviteMemberButton'\)\.hidden = true/);
+  assert.match(main, /dialog\.addEventListener\('cancel'[\s\S]*requestDialogClose\(dialog\)/);
 });
 
 test('Service Worker 强制更新资源、导航走网络，并把刷新交给有表单保护的页面', async () => {
@@ -64,14 +115,51 @@ test('Service Worker 强制更新资源、导航走网络，并把刷新交给�
   assert.doesNotMatch(worker, /client\.navigate\(/);
 });
 
-test('手机记账和账户明细使用中心悬浮层，可点空白或 Escape 动态关闭', async () => {
-  const [main, styles] = await Promise.all([readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+test('15 个 Dialog 共用 preparing/open/closing 生命周期，手机短位移且 Receipt 只淡入淡出', async () => {
+  const [html, main, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+  assert.equal((html.match(/<dialog\b/g) || []).length, 15);
   assert.match(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*center/);
-  assert.doesNotMatch(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*flex-end/);
-  assert.match(styles, /@keyframes modal-enter/);
-  assert.match(styles, /@keyframes modal-exit/);
+  assert.match(styles, /\.modal\[open\]\s*\{[^}]*align-items:\s*center/);
+  assert.match(styles, /@media \(max-width: 759px\)[\s\S]*\.sheet\[open\], \.modal\[open\]\s*\{[^}]*align-items:\s*flex-end/s);
+  assert.match(styles, /@media \(max-width: 759px\)[\s\S]*\.sheet\s*>\s*form,\s*\.sheet\s*>\s*div[^}]*\{[^}]*border-radius:\s*20px 20px 0 0/s);
+  assert.match(main, /classList\.add\('is-preparing'\);\s*dialog\.showModal\(\)/s);
+  assert.match(main, /requestAnimationFrame\(\(\) => requestAnimationFrame\(finishOpen\)\)/);
+  assert.match(main, /classList\.remove\('is-preparing'\);\s*dialog\.classList\.add\('is-open'\)/s);
+  assert.match(main, /prefersReducedMotion\(\)[\s\S]*finishOpen\(\);\s*return;/);
+  assert.match(main, /event\.target !== panel \|\| !\['opacity', 'transform'\]\.includes\(event\.propertyName\)/);
+  assert.match(main, /panel\.addEventListener\('transitionend', onTransitionEnd\)/);
+  assert.doesNotMatch(main, /addEventListener\('animationend'/);
+  assert.match(styles, /dialog\.is-open\s*\{[^}]*background-color:\s*rgba\([^;]*0\.42\)/s);
+  assert.match(styles, /dialog::backdrop\s*\{[^}]*background:\s*transparent/s);
+  assert.match(styles, /translate3d\(0, 24px, 0\)/);
+  assert.doesNotMatch(styles, /translateY\(100%\)|mobile-sheet-enter|mobile-sheet-exit/);
+  assert.match(styles, /\.topbar-actions-dialog\.is-open \.topbar-actions-backdrop\s*\{[^}]*opacity:\s*1/s);
+  assert.match(styles, /\.receipt-viewer\.is-open \.receipt-viewer-shell\s*\{[^}]*opacity:\s*1/s);
+  assert.match(styles, /\.receipt-viewer\[open\]\s*\{[^}]*background-color:\s*rgba\(13,\s*27,\s*24,\s*0\)/s);
+  assert.match(styles, /\.receipt-viewer\.is-open\s*\{[^}]*background-color:\s*#0d1b18/s);
+  assert.match(main, /if \(afterOpen\) requestAnimationFrame\(afterOpen\)/);
+  for (const [dialogId, focusId] of [['newItemDialog', 'newItemName'], ['entryDialog', 'amountInput'], ['accountDialog', 'accountName']]) {
+    assert.match(main, new RegExp(`showDialog\\(\\$\\('#${dialogId}'\\), \\(\\) => \\$\\('#${focusId}'\\)\\.focus\\(\\)\\)`));
+  }
+  assert.match(main, /showDialog\(\$\('#paymentDialog'\), \(\) => \(full \? \$\('#paymentDate'\) : \$\('#paymentAmount'\)\)\.focus\(\)\)/);
+  assert.doesNotMatch(main, /showDialog\([^\n]+\);\s*setTimeout\(\(\) => [^\n]*\.focus\(\), 30\)/);
+  const receiptOpenRule = styles.match(/\.receipt-viewer\.is-open \.receipt-viewer-shell\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.doesNotMatch(receiptOpenRule, /transform/);
   assert.match(main, /if \(event\.target === dialog\) requestDialogClose\(dialog\)/);
   assert.match(main, /dialog\.addEventListener\('cancel'/);
+  assert.equal((html.match(/class="account-picker-grabber"/g) || []).length, 1);
+  assert.doesNotMatch(html, /class="(?:sheet-handle|action-sheet-handle)"/);
+});
+
+test('视图短暂 crossfade、118px 手机底部预留与安全区 Toast 不改变导航语义', async () => {
+  const [main, styles] = await Promise.all([readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+  assert.match(main, /activeView = view;[\s\S]*data-view-target[\s\S]*aria-current[\s\S]*setAttribute\('data-view-transition', 'entering'\)/);
+  assert.match(main, /setTimeout\(\(\) => activeSection\?\.removeAttribute\('data-view-transition'\), 220\)/);
+  assert.match(main, /if \(scroll\) window\.scrollTo\(\{ top:0, behavior:'smooth' \}\)/);
+  assert.match(styles, /\.app-view(?:\[data-view-transition="entering"\])?\s*\{[^}]*animation:\s*view-enter/s);
+  assert.match(styles, /@keyframes view-enter\s*\{[^}]*opacity:\s*0[^}]*\}[^}]*opacity:\s*1/s);
+  assert.match(styles, /\.app-shell\s*\{[^}]*padding:[^;]*calc\(118px \+ env\(safe-area-inset-bottom\)\)/s);
+  assert.match(styles, /\.toast\s*\{[^}]*top:\s*auto[^}]*bottom:\s*calc\([^;]*env\(safe-area-inset-bottom\)[^;]*\+\s*82px\)/s);
 });
 
 test('快速分类提供指定 Icon 标签与其它自定义输入，备注仍保持可选', async () => {
@@ -109,6 +197,159 @@ test('新增账目会按支出、收入与转账分别记住有效账户', async
   assert.match(main, /function applyRememberedAccounts\(kind\)/);
   assert.match(main, /rememberEntryPreferences\(kind, changes\.accountId, changes\.targetAccountId\)/);
   assert.match(main, /account\.id !== sourceId/);
+});
+
+test('五个业务账户 select 共用全局原生 dialog Picker，并保留表单值语义', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  const openTags = [];
+  const labelAncestors = new Map();
+  const voidTags = new Set(['input', 'meta', 'link', 'img', 'br', 'hr']);
+  for (const match of html.matchAll(/<\/?([a-z][a-z0-9-]*)\b[^>]*>/gi)) {
+    const token = match[0];
+    const tag = match[1].toLowerCase();
+    if (token.startsWith('</')) {
+      while (openTags.length && openTags.pop() !== tag) {}
+      continue;
+    }
+    const id = token.match(/\bid="([^"]+)"/)?.[1];
+    if (id) labelAncestors.set(id, openTags.includes('label'));
+    if (!voidTags.has(tag) && !token.endsWith('/>')) openTags.push(tag);
+  }
+
+  const selectIds = ['sourceAccount', 'targetAccount', 'repaymentSourceAccount', 'newItemAccount', 'paymentAccount'];
+  for (const id of selectIds) {
+    assert.equal(labelAncestors.get(id), false, `${id} 不得嵌在 label 内`);
+    assert.doesNotMatch(html, new RegExp(`<label[^>]*\\bfor="${id}"`));
+    assert.match(html, new RegExp(`<select id="${id}"[^>]*\\bhidden\\b[^>]*\\btabindex="-1"[^>]*><\\/select>`));
+    assert.match(html, new RegExp(`id="${id}Trigger"[^>]*aria-labelledby="[^"]+"[^>]*aria-haspopup="listbox"[^>]*aria-expanded="false"[^>]*aria-controls="accountPickerOptions"`));
+  }
+  assert.equal((html.match(/class="account-picker-trigger"/g) || []).length, 5);
+  assert.equal((html.match(/<dialog class="account-picker-dialog" id="accountPickerDialog"/g) || []).length, 1);
+  assert.ok(html.indexOf('<dialog class="account-picker-dialog" id="accountPickerDialog"') > html.indexOf('</dialog>', html.indexOf('<dialog id="paymentDialog"')));
+  assert.match(html, /id="accountPickerBackdrop"[^>]*aria-label="关闭账户选择"/);
+  assert.match(html, /id="accountPickerTitle">选择账户<\/h3>/);
+  assert.match(html, /id="accountPickerOptions" role="listbox"/);
+  assert.doesNotMatch(html, /entryAccountSheet|entryAccountOptions/);
+  assert.match(html, /<select class="workspace-select" id="workspaceSelect"/);
+  assert.match(html, /<select id="loanType">/);
+  assert.match(html, /<select id="loanCalculationMode">/);
+  assert.doesNotMatch(html, /id="(?:workspaceSelect|loanType|loanCalculationMode)Trigger"/);
+
+  assert.equal((main.match(/function createAccountPicker\(/g) || []).length, 1);
+  assert.match(main, /showDialog\(dialog, \(\) => \{/);
+  assert.match(main, /key:'source'[^\n]*options:kind => entryAccounts\(kind\)/);
+  assert.match(main, /key:'target'[^\n]*options:\(\) => assetAccounts\(\)/);
+  assert.match(main, /key:'repayment'[^\n]*options:\(\) => assetAccounts\(\)/);
+  assert.match(main, /key:'newItem'[^\n]*options:\(\) => itemPaymentAccounts\(\)/);
+  assert.match(main, /key:'payment'[^\n]*options:\(\) => itemPaymentAccounts\(\)/);
+  for (const key of ['repayment', 'newItem', 'payment']) assert.match(main, new RegExp(`accountPicker\\.setOptions\\('${key}', null\\)`));
+  assert.doesNotMatch(main, /\$\('#(?:repaymentSourceAccount|newItemAccount|paymentAccount)'\)\.innerHTML/);
+  assert.match(main, /role="option"[^>]*aria-selected=/);
+  assert.equal((main.match(/select\.dispatchEvent\(new Event\('change', \{ bubbles:true \}\)\)/g) || []).length, 1);
+  assert.match(main, /control\.select\.value = accountId;[\s\S]*control\.select\.dispatchEvent\(new Event\('change', \{ bubbles:true \}\)\);\s*close\(\)/s);
+  assert.match(main, /control\.trigger\.disabled = control\.select\.disabled \|\| !selected/);
+  assert.match(main, /form\.querySelectorAll\('input, select'\).*control\.disabled = true; \}\);\s*accountPicker\.sync\('repayment'\)/s);
+  assert.match(main, /\['entryDialog', 'repaymentDialog', 'newItemDialog', 'paymentDialog'\]/);
+  assert.match(main, /dialog\?\.id === 'accountPickerDialog'\) accountPicker\.close\(true\)/);
+  assert.match(styles, /\.business-account-field > select\[hidden\]\s*\{[^}]*display:\s*none !important[^}]*pointer-events:\s*none !important/s);
+  assert.match(styles, /\.account-picker-trigger\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto auto[^}]*overflow:\s*hidden/s);
+  assert.doesNotMatch(styles, /\.account-picker-(?:type|amount)::before[^}]*content:\s*["']｜["']/s);
+  assert.match(styles, /\.account-picker-dialog\[open\]\s*\{[^}]*display:\s*grid[^}]*align-items:\s*end/s);
+  assert.match(styles, /\.account-picker-options\s*\{[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto/s);
+
+  const submitHandler = main.slice(main.indexOf("$('#entryForm').addEventListener('submit'"), main.indexOf("$('#archiveTransactionButton').addEventListener('click'"));
+  assert.match(submitHandler, /const form = new FormData\(event\.currentTarget\)/);
+  assert.match(submitHandler, /accountId:form\.get\('accountId'\)/);
+  assert.match(submitHandler, /targetAccountId:kind === 'transfer' \? form\.get\('targetAccountId'\) : null/);
+});
+
+test('账户 Picker 单一 CSS transform owner，轻拖回弹且阈值关闭不先上跳', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  assert.match(html, /class="account-picker-grabber"/);
+  assert.match(main, /dragHandleSelector = '\.account-picker-grabber, \.account-picker-handle, \.account-picker-head'/);
+  assert.match(main, /dragCloseDistance = 72/);
+  assert.match(main, /dragCloseVelocity = 0\.55/);
+  assert.match(main, /panel\.addEventListener\('pointerdown'/);
+  assert.match(main, /event\.target\.closest\(dragHandleSelector\)/);
+  assert.match(main, /event\.target\.closest\('button, a, input, select, textarea, \[role="button"\]'\)/);
+  assert.match(main, /panel\.setPointerCapture\?\.\(event\.pointerId\)/);
+  assert.match(main, /const dragY = Math\.max\(0, event\.clientY - dragState\.startY\)/);
+  assert.match(main, /style\.setProperty\('--sheet-drag-y', `\$\{dragY\}px`\)/);
+  assert.match(main, /releaseVelocity = event\.timeStamp - dragState\.lastTime <= 80 \? dragState\.velocity : 0/);
+  assert.match(main, /dragState\.dragY > dragCloseDistance \|\| releaseVelocity > dragCloseVelocity/);
+  assert.match(main, /if \(shouldClose\) close\(true, \{ preserveDrag:true \}\);\s*else resetDrag\(true\)/);
+  assert.match(main, /panel\.classList\.add\('is-dragging'\)/);
+  assert.match(main, /panel\.classList\.remove\('is-dragging'\)/);
+  assert.match(main, /panel\.addEventListener\('pointercancel'[\s\S]*resetDrag\(true\)/);
+  assert.match(main, /if \(animate && dragY > 0 && !prefersReducedMotion\(\)\) void panel\.offsetHeight;\s*panel\.style\.setProperty\('--sheet-drag-y', '0px'\)/s);
+  assert.doesNotMatch(main, /panel\.animate|\.animate\?\.\(/);
+  assert.match(main, /if \(preserveDrag\)[\s\S]*panel\.classList\.remove\('is-dragging'\);\s*void panel\.offsetHeight;[\s\S]*dismissDialog\(dialog, finishClose\)/s);
+  assert.match(styles, /\.account-picker-dialog\.is-open \.account-picker-panel\s*\{[^}]*transform:\s*translate3d\(0, var\(--sheet-drag-y\), 0\)/s);
+  assert.match(styles, /\.account-picker-dialog\.is-closing \.account-picker-panel\s*\{[^}]*calc\(var\(--sheet-drag-y\) \+ 20px\)/s);
+  assert.match(styles, /\.account-picker-panel\.is-dragging\s*\{[^}]*transition:\s*none/s);
+  assert.match(styles, /\.account-picker-grabber[^}]*touch-action:\s*none/s);
+  assert.match(styles, /\.account-picker-options\s*\{[^}]*overflow-y:\s*auto[^}]*touch-action:\s*pan-y/s);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.account-picker-panel\s*\{[^}]*transition:\s*none !important/s);
+});
+
+test('物品 Tab、上传控件与封面编辑器保持移动端契约', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  assert.match(styles, /\.items-segmented\s*\{[^}]*width:\s*100%[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)[^}]*padding:\s*4px/s);
+  assert.match(styles, /\.items-segmented label, \.items-segmented span\s*\{[^}]*width:\s*100%/s);
+  assert.match(html, /id="newItemCover" type="file"[^>]*class="visually-hidden-file"|class="visually-hidden-file" id="newItemCover" type="file"/);
+  assert.match(html, /id="newItemReceipt" type="file"[^>]*class="visually-hidden-file"|class="visually-hidden-file" id="newItemReceipt" type="file"/);
+  for (const id of ['newItemCoverFileName', 'removeNewItemCover', 'newItemReceiptFileName', 'removeNewItemReceipt', 'newItemCoverEditor', 'newItemCoverViewport', 'newItemCoverZoom']) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /name="newItemCoverMode" value="full" checked/);
+  assert.match(html, /name="newItemCoverMode" value="crop"/);
+  assert.match(main, /compressItemMedia\(file, kind, renderPlan \? \{ renderPlan \} : \{\}\)/);
+  assert.match(main, /prepareFormMedia\(\$\('#newItemCover'\), 'cover',[\s\S]*currentNewItemCoverRenderPlan\(\)\)/);
+  assert.match(styles, /\.file-upload-row\s*\{[^}]*min-height:\s*58px[^}]*padding:\s*6px[^}]*border:/s);
+  assert.match(styles, /\.cover-editor-viewport\s*\{[^}]*aspect-ratio:\s*4\s*\/\s*5[^}]*touch-action:\s*none/s);
+});
+
+test('七个 date input 在 50px Safari shell 内垂直居中且保留系统 Picker', async () => {
+  const [html, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+  const dateIds = ['dateInput', 'expectedPayoffDate', 'repaymentDate', 'newItemEtaDate', 'newItemDepositDate', 'paymentDate', 'editItemEtaDate'];
+  for (const id of dateIds) {
+    assert.match(html, new RegExp(`<span class="date-input-shell">\\s*<input id="${id}"[^>]*type="date"[^>]*>\\s*<\\/span>`));
+  }
+  assert.equal((html.match(/class="date-input-shell"/g) || []).length, 7);
+  assert.doesNotMatch(html, /<span class="date-input-shell">\s*<input id="monthPicker"/);
+  const shellRule = styles.match(/\.date-input-shell\s*\{([^}]*)\}/)?.[1] ?? '';
+  for (const declaration of [
+    /display:\s*flex/, /align-items:\s*center/, /height:\s*50px/, /min-height:\s*50px/,
+    /width:\s*100%/, /min-width:\s*0/, /max-width:\s*100%/, /inline-size:\s*100%/,
+    /min-inline-size:\s*0/, /max-inline-size:\s*100%/, /overflow:\s*hidden/, /border:/, /background:/
+  ]) assert.match(shellRule, declaration);
+  const inputRule = styles.match(/\.field \.date-input-shell > input\[type="date"\]\s*\{([^}]*)\}/)?.[1] ?? '';
+  for (const declaration of [
+    /display:\s*flex/, /align-items:\s*center/, /height:\s*48px/, /min-height:\s*48px/, /padding-block:\s*0/, /line-height:\s*1\.2/,
+    /width:\s*100%/, /min-width:\s*0/, /max-width:\s*100%/, /inline-size:\s*100%/,
+    /min-inline-size:\s*0/, /box-sizing:\s*border-box/, /border:\s*0/, /background:\s*transparent/,
+    /-webkit-appearance:\s*none/, /appearance:\s*none/
+  ]) assert.match(inputRule, declaration);
+  assert.match(styles, /::-webkit-date-and-time-value,\s*\n\.field \.date-input-shell > input\[type="date"\]::-webkit-datetime-edit\s*\{[^}]*display:\s*flex[^}]*align-items:\s*center[^}]*height:\s*100%[^}]*margin:\s*0[^}]*padding:\s*0[^}]*text-align:\s*left/s);
+  assert.match(styles, /::-webkit-calendar-picker-indicator\s*\{[^}]*align-self:\s*center/s);
+  assert.doesNotMatch(styles, /::-webkit-calendar-picker-indicator\s*\{[^}]*(?:display:\s*none|visibility:\s*hidden)/s);
+});
+
+test('还款资金标题独立于分段框，全部欠款动作位于金额标题行且保持低层级', async () => {
+  const [html, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+  assert.match(html, /<span class="field-label repayment-funding-label" id="repaymentFundingLabel">还款资金来源<\/span>\s*<fieldset class="segmented repayment-funding-control" aria-labelledby="repaymentFundingLabel">/);
+  assert.doesNotMatch(html, /<fieldset class="segmented repayment-funding-control"[^>]*>\s*<legend>/);
+  assert.match(html, /name="repaymentFunding" value="asset" checked/);
+  assert.match(html, /name="repaymentFunding" value="off_ledger"/);
+  assert.match(html, /<div class="repayment-amount-title-row"><label id="repaymentAmountLabel" for="repaymentAmount">[^<]+<\/label><button class="repayment-full-button" id="repaymentFullButton" type="button">填入全部欠款<\/button><\/div>\s*<div class="amount-input"><b>RM<\/b><input id="repaymentAmount"/);
+  assert.match(styles, /\.repayment-funding-control\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
+  assert.match(styles, /\.repayment-full-button\s*\{[^}]*min-height:\s*44px[^}]*border:\s*0[^}]*background:\s*transparent/s);
 });
 
 test('账目显示账户流向，账户点击先打开当月明细再进入编辑', async () => {
@@ -149,7 +390,7 @@ test('桌面断点使用左侧导航与宽内容区，手机规则保持独立',
   assert.match(styles, /width:\s*min\(calc\(100% - 190px\), 1180px\)/);
   assert.match(styles, /\.bottom-nav\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(styles, /@media \(max-width: 420px\)\s*\{/);
-  assert.match(styles, /\.bottom-nav\s*\{ width:\s*calc\(100% - 16px\); \}/);
+  assert.match(styles, /\.bottom-nav(?:, \.new-entry-accessory)?\s*\{\s*width:\s*calc\(100% - 16px\);\s*\}/);
 });
 
 test('账目明细可从列表进入编辑，并在编辑表单中安全移入回收站', async () => {
@@ -258,7 +499,7 @@ test('物品橱窗、设置导出与同步恢复均接入真实运行路径', as
   assert.match(styles, /\.items-grid\s*\{[^}]*repeat\(2,/s);
   assert.match(styles, /@media \(min-width: 1024px\)[\s\S]*\.items-grid\s*\{[^}]*repeat\(4,/);
   assert.match(styles, /\.modal\[open\]\s*\{[^}]*align-items:\s*center/);
-  assert.doesNotMatch(styles, /\.modal\[open\]\s*\{[^}]*align-items:\s*flex-end/);
+  assert.match(styles, /@media \(max-width: 759px\)[\s\S]*\.sheet\[open\], \.modal\[open\]\s*\{[^}]*align-items:\s*flex-end/s);
 });
 
 test('同步状态区分缓存、待同步、离线和恢复，并在前台事件后重订阅', async () => {
@@ -324,7 +565,7 @@ test('删除物品会成组作废付款与关联账目，并在回收站恢复�
 
 test('已同步状态点按会安全刷新 App，其他状态仍执行同步恢复', async () => {
   const [html, main] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8')]);
-  assert.match(html, /id="syncBadge"[^>]*已同步时点按可刷新App/);
+  assert.match(html, /id="syncBadge"[^>]*已同步时点按可刷新\s*App/);
   assert.match(main, /synced:'已同步 ↻'/);
   assert.match(main, /state\.status === 'synced' && !itemListenerError/);
   assert.match(main, /if \(hasOpenWalletDialog\(\)\)/);
