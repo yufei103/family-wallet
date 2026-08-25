@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-26/);
+  assert.match(worker, /family-wallet-v2-cloud-27/);
 });
 
 test('Apple/iPhone 壳层保留五项导航与中央圆形新增入口', async () => {
@@ -780,7 +780,19 @@ test('手机信息架构把恢复、跨月筛选、状态与快捷记账放到�
   assert.match(accountsView, /class="view-header"[\s\S]*余额来自可对账账本[\s\S]*id="newAccountButton"/);
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 26 候选和受支持 runtime', async () => {
+test('Maybank 手机 Dialog 不把 Safari 26 底栏染黄，账户分组没有重复外框', async () => {
+  const [html, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
+  const accountList = html.match(/<div[^>]*id="accountList"[^>]*>/)?.[0] ?? '';
+  assert.match(accountList, /class="account-list"/);
+  assert.doesNotMatch(accountList, /surface-list/);
+  assert.match(styles, /\.account-list:has\(\.account-group\)\s*\{[^}]*background:\s*transparent[^}]*box-shadow:\s*none/s);
+  assert.match(styles, /\.account-group-list\s*\{[^}]*border-radius:\s*var\(--radius-card\)[^}]*background:\s*var\(--surface\)[^}]*box-shadow:/s);
+  assert.match(styles, /\.sheet-actions\s*\{[^}]*position:\s*sticky[^}]*background:\s*transparent/s);
+  assert.match(styles, /\.sheet-actions::before\s*\{[^}]*position:\s*absolute[^}]*background:\s*linear-gradient/s);
+  assert.doesNotMatch(styles, /\.sheet-actions\s*\{[^}]*background:\s*linear-gradient/s);
+});
+
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 27 候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -789,7 +801,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 26 候选和�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-26/);
+  assert.match(worker, /family-wallet-v2-cloud-27/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'
