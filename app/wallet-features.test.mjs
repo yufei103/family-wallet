@@ -29,10 +29,14 @@ test('默认月份限制列表；全部月份与自定义范围不会被月份�
   assert.deepEqual(filterEntries(entries, { month:'2026-02', dateFrom:'2026-01-01', dateTo:'2026-01-31' }, accounts, format).map(x => x.id), ['jan']);
 });
 
-test('复制上一笔只返回可编辑业务字段，不复用 ID/operation/createdAt/date', () => {
-  const copy = copyPreviousEntry(entries);
+test('复制上一笔只取当前 kind，并只返回可编辑业务字段', () => {
+  const copy = copyPreviousEntry(entries, 'transfer');
   assert.deepEqual(copy, { kind:'transfer', category:'', note:'零钱', accountId:'bank', targetAccountId:'cash', amountMinor:1000 });
   for (const forbidden of ['id','operationId','createdAt','occurredAt']) assert.equal(Object.hasOwn(copy, forbidden), false);
+  assert.equal(copyPreviousEntry(entries, 'expense').kind, 'expense');
+  assert.equal(copyPreviousEntry(entries, 'income').kind, 'income');
+  assert.equal(copyPreviousEntry(entries, 'repayment'), null);
+  assert.equal(copyPreviousEntry(entries.filter(entry => entry.kind !== 'income'), 'income'), null);
 });
 
 test('常用模板按 user+household 隔离，可删除且不会提交', () => {
@@ -44,6 +48,23 @@ test('常用模板按 user+household 隔离，可删除且不会提交', () => {
   assert.equal(Object.hasOwn(loadEntryTemplates(storage, 'u1', 'h1')[0], 'submit'), false);
   deleteEntryTemplate(storage, 'u1', 'h1', 't1');
   assert.equal(loadEntryTemplates(storage, 'u1', 'h1').length, 0);
+});
+
+test('常用模板按 kind 过滤，0 与 4+ 模板场景保持 user+household 隔离', () => {
+  const storage = memory();
+  assert.deepEqual(loadEntryTemplates(storage, 'u1', 'h1', 'expense'), []);
+  for (let index = 0; index < 5; index += 1) {
+    saveEntryTemplate(storage, 'u1', 'h1', {
+      id:`expense-${index}`, name:`支出 ${index}`, kind:'expense', category:'购物', note:'', accountId:'cash', amountMinor:100 + index
+    });
+  }
+  saveEntryTemplate(storage, 'u1', 'h1', { id:'income-1', name:'薪水', kind:'income', category:'薪水', accountId:'bank', amountMinor:500000 });
+  saveEntryTemplate(storage, 'u1', 'h1', { id:'transfer-1', name:'转账', kind:'transfer', accountId:'bank', targetAccountId:'cash', amountMinor:1000 });
+  assert.equal(loadEntryTemplates(storage, 'u1', 'h1', 'expense').length, 5);
+  assert.deepEqual(loadEntryTemplates(storage, 'u1', 'h1', 'income').map(template => template.id), ['income-1']);
+  assert.deepEqual(loadEntryTemplates(storage, 'u1', 'h1', 'transfer').map(template => template.id), ['transfer-1']);
+  assert.equal(loadEntryTemplates(storage, 'u2', 'h1', 'expense').length, 0);
+  assert.equal(loadEntryTemplates(storage, 'u1', 'h2', 'expense').length, 0);
 });
 
 test('引导从真实资料与 owner 权限派生，dismiss 按成员与账本隔离', () => {

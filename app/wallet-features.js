@@ -41,8 +41,9 @@ export function activeFilterSummary(filters, accountName = '', resultCount = 0) 
   return labels.length ? `${labels.join(' · ')} · ${resultCount} 个结果` : `${resultCount} 个结果`;
 }
 
-export function copyPreviousEntry(entries) {
-  const previous = entries.filter(entry => !entry.deletedAt && !entry.purgedAt && ['income','expense','transfer'].includes(entry.kind))
+export function copyPreviousEntry(entries, kind) {
+  if (!['income','expense','transfer'].includes(kind)) return null;
+  const previous = entries.filter(entry => !entry.deletedAt && !entry.purgedAt && entry.kind === kind)
     .sort((a,b) => String(b.occurredAt).localeCompare(String(a.occurredAt)) || String(b.createdAt).localeCompare(String(a.createdAt)))[0];
   if (!previous) return null;
   return {
@@ -59,10 +60,11 @@ function readStore(storage, key) {
   } catch { return {}; }
 }
 
-export function loadEntryTemplates(storage, userId, householdId) {
+export function loadEntryTemplates(storage, userId, householdId, kind = null) {
   const store = readStore(storage, TEMPLATE_STORE);
   const templates = store[entryScopeKey(userId, householdId)];
-  return Array.isArray(templates) ? clone(templates).filter(template => template && typeof template.id === 'string') : [];
+  return Array.isArray(templates) ? clone(templates).filter(template => template && typeof template.id === 'string'
+    && (!kind || template.kind === kind)) : [];
 }
 
 export function saveEntryTemplate(storage, userId, householdId, template) {

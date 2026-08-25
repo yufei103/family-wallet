@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-25/);
+  assert.match(worker, /family-wallet-v2-cloud-26/);
 });
 
 test('Apple/iPhone 壳层保留五项导航与中央圆形新增入口', async () => {
@@ -115,10 +115,10 @@ test('Service Worker 强制更新资源、导航走网络，并把刷新交给�
   assert.doesNotMatch(worker, /client\.navigate\(/);
 });
 
-test('17 个 Dialog（含筛选和恢复预览）共用 preparing/open/closing 生命周期，手机短位移且 Receipt 只淡入淡出', async () => {
+test('18 个 Dialog（含筛选、快捷记账和恢复预览）共用 preparing/open/closing 生命周期，手机短位移且 Receipt 只淡入淡出', async () => {
   const [html, main, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
-  assert.equal((html.match(/<dialog\b/g) || []).length, 17);
-  for (const id of ['entryFilterDialog', 'restorePreviewDialog']) {
+  assert.equal((html.match(/<dialog\b/g) || []).length, 18);
+  for (const id of ['entryFilterDialog', 'entryShortcutsDialog', 'restorePreviewDialog']) {
     assert.match(html, new RegExp(`<dialog[^>]*id="${id}"`));
     assert.match(html, new RegExp(`data-close-dialog="${id}"`));
   }
@@ -722,7 +722,7 @@ test('成熟度升级把恢复、成员、筛选、模板、引导与 actor 接�
   assert.match(main, /cloud\.restoreBackupCopy\(\{ identity:request\.identity, validated:request\.validated, user:cloudUser \}\)/);
   assert.match(main, /replaceLocalAtomically\(\{[\s\S]*downloadCurrent:\(\) => downloadCurrentBackup/);
   assert.match(main, /function filteredEntries\(\)[\s\S]*filterEntries\(liveEntries\(\)/);
-  assert.match(main, /copyPreviousEntry\(liveEntries\(\)\)/);
+  assert.match(main, /copyPreviousEntry\(liveEntries\(\), kind\)/);
   assert.match(main, /saveEntryTemplate\(localStorage, scope\.userId, scope\.householdId/);
   assert.match(main, /onboardingState\(\{/);
   assert.ok((main.match(/visibleActor\(/g) || []).length >= 5);
@@ -736,7 +736,51 @@ test('成熟度升级把恢复、成员、筛选、模板、引导与 actor 接�
   }
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 25 候选和受支持 runtime', async () => {
+test('手机信息架构把恢复、跨月筛选、状态与快捷记账放到稳定层级', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+
+  const restoreInput = html.match(/<input[^>]*id="restoreFileInput"[^>]*>/)?.[0] ?? '';
+  assert.match(restoreInput, /class="[^"]*visually-hidden-file[^"]*restore-file-input[^"]*"/);
+  assert.match(restoreInput, /accept="application\/json,\.json"/);
+  assert.doesNotMatch(restoreInput, /\shidden(?:\s|>)/);
+  assert.match(html, /<label[^>]*id="restoreFileButton"[^>]*for="restoreFileInput"[^>]*>导入并恢复备份<\/label>/);
+  assert.match(styles, /\.restore-file-button\s*\{[^}]*display:\s*inline-flex[^}]*align-items:\s*center[^}]*justify-content:\s*center[^}]*min-height:\s*52px/s);
+  assert.match(styles, /\.restore-file-input:focus-visible \+ \.restore-file-button/);
+
+  const entriesView = html.slice(html.indexOf('data-view="entries"'), html.indexOf('data-view="accounts"'));
+  const filterDialog = html.match(/<dialog[^>]*id="entryFilterDialog"[^>]*>[\s\S]*?<\/dialog>/)?.[0] ?? '';
+  const searchRow = entriesView.match(/<div class="entry-filter-bar"[^>]*>[\s\S]*?<\/div>/)?.[0] ?? '';
+  assert.equal((html.match(/id="allMonthsToggle"/g) || []).length, 1);
+  assert.match(filterDialog, /id="allMonthsToggle"/);
+  assert.doesNotMatch(searchRow, /allMonthsToggle|全部月份/);
+  assert.match(main, /allMonths:\$\('#allMonthsToggle'\)\.checked/);
+  assert.doesNotMatch(main, /\$\('#allMonthsToggle'\)\.addEventListener\('change'/);
+  assert.match(main, /entryFilters = \{ keyword:'', kind:'all', accountId:'all', category:'all', dateFrom:'', dateTo:'', allMonths:false \}/);
+
+  const entryForm = html.match(/<form method="dialog" id="entryForm">[\s\S]*?<\/form>/)?.[0] ?? '';
+  const shortcutsDialog = html.match(/<dialog[^>]*id="entryShortcutsDialog"[^>]*>[\s\S]*?<\/dialog>/)?.[0] ?? '';
+  assert.equal((entryForm.match(/id="openEntryShortcuts"/g) || []).length, 1);
+  assert.match(entryForm, /class="sheet-head"[\s\S]*class="sheet-head-actions entry-head-actions"[\s\S]*id="openEntryShortcuts"[\s\S]*data-close-dialog="entryDialog"/);
+  assert.doesNotMatch(entryForm, /id="copyPreviousEntry"|id="saveEntryTemplate"|id="entryTemplateList"/);
+  for (const id of ['copyPreviousEntry', 'saveEntryTemplate', 'entryTemplateList']) assert.match(shortcutsDialog, new RegExp(`id="${id}"`));
+  assert.match(main, /loadEntryTemplates\(localStorage, scope\.userId, scope\.householdId, kind\)/);
+  assert.match(main, /还没有可复制的\$\{typeLabel\(kind\)\}/);
+  assert.match(styles, /\.entry-shortcuts-dialog > div\s*\{[^}]*max-height:\s*min\(78dvh, 560px\)[^}]*overflow:\s*hidden/s);
+  assert.match(styles, /\.entry-template-list\s*\{[^}]*max-height:\s*min\(42dvh, 300px\)[^}]*overflow-y:\s*auto/s);
+  assert.match(styles, /\.entry-shortcut-trigger\s*\{[^}]*width:\s*auto[^}]*min-height:\s*44px[^}]*margin:\s*0[^}]*border:\s*0/s);
+
+  assert.match(html, /<div class="sync-status-row"[^>]*>[\s\S]*id="privacyNote"[\s\S]*id="syncBadge"[\s\S]*<\/div>/);
+  assert.match(styles, /\.sync-status-row\s*\{[^}]*min-width:\s*0[^}]*min-height:\s*44px/s);
+  assert.match(styles, /\.privacy-note\s*\{[^}]*min-width:\s*0[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/s);
+  assert.match(entriesView, /class="view-header month-context-row"[\s\S]*class="view-kicker">家庭收支<[\s\S]*id="monthFilterButton"/);
+  assert.doesNotMatch(entriesView, /查看每个月的家庭收支/);
+  const accountsView = html.slice(html.indexOf('data-view="accounts"'), html.indexOf('data-view="items"'));
+  assert.match(accountsView, /class="view-header"[\s\S]*余额来自可对账账本[\s\S]*id="newAccountButton"/);
+});
+
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 26 候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -745,7 +789,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 25 候选和�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-25/);
+  assert.match(worker, /family-wallet-v2-cloud-26/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'

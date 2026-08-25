@@ -1891,6 +1891,11 @@ function updateKindState() {
   $('#categoryRow').hidden = transfer;
   accountPicker.close();
   populateEntryAccounts(kind, $('#sourceAccount').value, $('#targetAccount').value);
+  if ($('#entryShortcutsDialog').open) renderEntryTemplates();
+}
+
+function currentEntryKind() {
+  return document.querySelector('input[name="kind"]:checked').value;
 }
 
 function applyEntryBusinessFields(values, feedback) {
@@ -1915,26 +1920,22 @@ function applyEntryBusinessFields(values, feedback) {
 
 function renderEntryTemplates() {
   const list = $('#entryTemplateList');
-  const editing = Boolean($('#editingTransactionId').value);
-  document.querySelector('.entry-shortcuts').hidden = editing;
-  list.hidden = editing;
-  if (editing) {
-    list.innerHTML = '';
-    return;
-  }
+  const kind = currentEntryKind();
+  const kindLabel = typeLabel(kind);
+  $('#entryShortcutsTitle').textContent = `${kindLabel}快捷方式`;
   const scope = currentScope();
-  const templates = loadEntryTemplates(localStorage, scope.userId, scope.householdId);
+  const templates = loadEntryTemplates(localStorage, scope.userId, scope.householdId, kind);
   list.innerHTML = templates.length ? templates.map(template =>
     `<div class="entry-template-row"><button class="entry-template-apply" type="button" data-template-id="${escapeHtml(template.id)}"><b>${escapeHtml(template.name)}</b><small>${escapeHtml(typeLabel(template.kind))} · ${formatRM(template.amountMinor)}</small></button><button class="entry-template-delete" type="button" data-delete-template="${escapeHtml(template.id)}" aria-label="删除 ${escapeHtml(template.name)}">×</button></div>`
-  ).join('') : '<p class="entry-template-empty">可把当前表单存为常用账目，之后一键预填。</p>';
+  ).join('') : `<p class="entry-template-empty">还没有${escapeHtml(kindLabel)}常用模板。可先填写表单，再存为常用。</p>`;
   list.querySelectorAll('[data-template-id]').forEach(button => button.addEventListener('click', () => {
     const template = templates.find(candidate => candidate.id === button.dataset.templateId);
-    applyEntryBusinessFields(template, `已套用「${template?.name || '常用账目'}」，请确认后保存。`);
+    dismissDialog($('#entryShortcutsDialog'), () => applyEntryBusinessFields(template, `已套用「${template?.name || '常用账目'}」，请确认后保存。`));
   }));
   list.querySelectorAll('[data-delete-template]').forEach(button => button.addEventListener('click', () => {
     deleteEntryTemplate(localStorage, scope.userId, scope.householdId, button.dataset.deleteTemplate);
     renderEntryTemplates();
-    $('#entryMessage').textContent = '常用账目已删除。';
+    $('#entryShortcutMessage').textContent = '常用账目已删除。';
   }));
 }
 
@@ -1982,6 +1983,7 @@ function openEntry(id = null) {
   $('#entryDialogTitle').textContent = entry ? '编辑账目' : '新增账目';
   $('#saveEntryButton').textContent = entry ? '保存修改' : '保存账目';
   $('#archiveTransactionButton').hidden = !entry;
+  $('#openEntryShortcuts').hidden = Boolean(entry);
 
   if (entry) {
     document.querySelector(`input[name="kind"][value="${entry.kind}"]`).checked = true;
@@ -2816,10 +2818,6 @@ $('#entrySearchInput').addEventListener('input', event => {
   entryFilters.keyword = event.target.value;
   renderEntryResults();
 });
-$('#allMonthsToggle').addEventListener('change', event => {
-  entryFilters.allMonths = event.target.checked;
-  renderEntryResults();
-});
 $('#openEntryFilters').addEventListener('click', () => {
   renderEntryFilterOptions();
   $('#entryKindFilter').value = entryFilters.kind;
@@ -2827,6 +2825,7 @@ $('#openEntryFilters').addEventListener('click', () => {
   $('#entryCategoryFilter').value = entryFilters.category;
   $('#entryDateFrom').value = entryFilters.dateFrom;
   $('#entryDateTo').value = entryFilters.dateTo;
+  $('#allMonthsToggle').checked = entryFilters.allMonths;
   showDialog($('#entryFilterDialog'), () => $('#entryKindFilter').focus());
 });
 $('#entryFilterForm').addEventListener('submit', event => {
@@ -2843,7 +2842,8 @@ $('#entryFilterForm').addEventListener('submit', event => {
     accountId:$('#entryAccountFilter').value,
     category:$('#entryCategoryFilter').value,
     dateFrom,
-    dateTo
+    dateTo,
+    allMonths:$('#allMonthsToggle').checked
   };
   dismissDialog($('#entryFilterDialog'));
   renderEntryResults();
@@ -2853,16 +2853,22 @@ $('#clearEntryFilters').addEventListener('click', () => {
   renderEntryResults();
   $('#entrySearchInput').focus();
 });
+$('#openEntryShortcuts').addEventListener('click', () => {
+  $('#entryShortcutMessage').textContent = '';
+  renderEntryTemplates();
+  showDialog($('#entryShortcutsDialog'), () => $('#copyPreviousEntry').focus());
+});
 $('#copyPreviousEntry').addEventListener('click', () => {
-  const copy = copyPreviousEntry(liveEntries());
+  const kind = currentEntryKind();
+  const copy = copyPreviousEntry(liveEntries(), kind);
   if (!copy) {
-    $('#entryMessage').textContent = '还没有可复制的收入、支出或转账。';
+    $('#entryShortcutMessage').textContent = `还没有可复制的${typeLabel(kind)}。`;
     return;
   }
-  applyEntryBusinessFields(copy, '已复制上一笔，日期已改为今天，请确认后保存。');
+  dismissDialog($('#entryShortcutsDialog'), () => applyEntryBusinessFields(copy, `已复制上一笔${typeLabel(kind)}，日期已改为今天，请确认后保存。`));
 });
 $('#saveEntryTemplate').addEventListener('click', () => {
-  $('#entryMessage').classList.remove('success');
+  $('#entryShortcutMessage').classList.remove('success');
   try {
     const template = currentEntryTemplate();
     const suggested = template.note || template.category || '常用账目';
@@ -2871,11 +2877,10 @@ $('#saveEntryTemplate').addEventListener('click', () => {
     const scope = currentScope();
     saveEntryTemplate(localStorage, scope.userId, scope.householdId, { ...template, name:name.trim() || suggested });
     renderEntryTemplates();
-    $('#entryMessage').textContent = '已存为常用账目，不会自动提交。';
-    $('#entryMessage').classList.add('success');
-    $('#amountInput').focus();
+    $('#entryShortcutMessage').textContent = '已存为常用账目，不会自动提交。';
+    $('#entryShortcutMessage').classList.add('success');
   } catch (error) {
-    $('#entryMessage').textContent = error.message;
+    $('#entryShortcutMessage').textContent = error.message;
   }
 });
 $('#dismissGettingStarted').addEventListener('click', () => {

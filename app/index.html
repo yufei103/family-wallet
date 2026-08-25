@@ -40,7 +40,6 @@
       <div class="topbar-copy">
         <p class="app-name">Family Wallet</p>
         <h1 id="viewTitle">概览</h1>
-        <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；已同步时点按可刷新 App">准备中</button>
       </div>
       <div class="topbar-actions">
         <select class="workspace-select" id="workspaceSelect" aria-label="选择个人或家庭账本"></select>
@@ -48,7 +47,10 @@
       </div>
     </header>
 
-    <p class="privacy-note" id="privacyNote">正在确认资料储存位置…</p>
+    <div class="sync-status-row" aria-label="资料储存与同步状态">
+      <p class="privacy-note" id="privacyNote">正在确认资料储存位置…</p>
+      <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；已同步时点按可刷新 App">准备中</button>
+    </div>
 
     <section class="app-view view-overview" data-view="overview" aria-labelledby="viewTitle">
       <section class="getting-started" id="gettingStarted" aria-labelledby="gettingStartedTitle" hidden>
@@ -118,10 +120,10 @@
     </section>
 
     <section class="app-view" data-view="entries" aria-labelledby="entriesHeading" hidden>
-      <div class="view-header">
-        <div>
+      <div class="view-header month-context-row">
+        <div class="view-header-copy">
           <h2 class="visually-hidden-heading" id="entriesHeading">账目</h2>
-          <p>查看每个月的家庭收支</p>
+          <p class="view-kicker">家庭收支</p>
         </div>
         <div class="view-actions">
           <button class="control-button" id="monthFilterButton" type="button" aria-label="选择月份">
@@ -140,7 +142,6 @@
       <div class="entry-filter-bar" aria-label="搜索与筛选账目">
         <label class="entry-search"><span class="visually-hidden-heading">搜索账目</span><input id="entrySearchInput" type="search" placeholder="搜索分类、备注、账户或金额"></label>
         <button class="secondary-button compact" id="openEntryFilters" type="button">筛选</button>
-        <label class="all-months-toggle"><input id="allMonthsToggle" type="checkbox"><span>全部月份</span></label>
       </div>
       <div class="filter-status"><span id="entryFilterSummary">0 个结果</span><button class="text-button" id="clearEntryFilters" type="button" hidden>清除</button></div>
       <div class="transaction-list surface-list" id="transactionList" aria-live="polite"></div>
@@ -209,7 +210,10 @@
     <form method="dialog" id="entryForm">
       <div class="sheet-head">
         <div><p class="sheet-context">快速记账</p><h2 id="entryDialogTitle">新增账目</h2></div>
-        <button class="icon-button" type="button" data-close-dialog="entryDialog" aria-label="关闭">×</button>
+        <div class="sheet-head-actions entry-head-actions">
+          <button class="text-button entry-shortcut-trigger" id="openEntryShortcuts" type="button" aria-haspopup="dialog" aria-controls="entryShortcutsDialog">快捷</button>
+          <button class="icon-button" type="button" data-close-dialog="entryDialog" aria-label="关闭">×</button>
+        </div>
       </div>
       <input id="editingTransactionId" type="hidden">
       <fieldset class="segmented" id="kindControl">
@@ -217,11 +221,6 @@
         <label><input type="radio" name="kind" value="income"><span>收入</span></label>
         <label><input type="radio" name="kind" value="transfer"><span>转账</span></label>
       </fieldset>
-      <div class="entry-shortcuts">
-        <button class="minor-button" id="copyPreviousEntry" type="button">复制上一笔</button>
-        <button class="minor-button" id="saveEntryTemplate" type="button">存为常用</button>
-      </div>
-      <div class="entry-template-list" id="entryTemplateList" aria-label="常用账目模板"></div>
       <label class="field amount-field"><span>金额</span><div class="amount-input"><b>RM</b><input id="amountInput" name="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" required></div></label>
       <div class="field business-account-field" id="sourceRow">
         <span id="sourceAccountLabel">账户</span>
@@ -261,6 +260,18 @@
         <button class="danger-button" id="archiveTransactionButton" type="button" hidden>移入回收站</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="entryShortcutsDialog" class="sheet compact-sheet entry-shortcuts-dialog">
+    <div>
+      <div class="sheet-head"><div><p class="sheet-context">快捷记账</p><h2 id="entryShortcutsTitle">支出快捷方式</h2></div><button class="icon-button" type="button" data-close-dialog="entryShortcutsDialog" aria-label="关闭">×</button></div>
+      <div class="entry-shortcuts" aria-label="快捷记账操作">
+        <button class="minor-button" id="copyPreviousEntry" type="button">复制上一笔</button>
+        <button class="minor-button" id="saveEntryTemplate" type="button">存为常用</button>
+      </div>
+      <p class="form-message entry-shortcut-message" id="entryShortcutMessage" aria-live="polite"></p>
+      <div class="entry-template-list" id="entryTemplateList" aria-label="当前类型的常用账目模板"></div>
+    </div>
   </dialog>
 
   <dialog id="accountDetailDialog" class="sheet account-detail-sheet">
@@ -402,6 +413,7 @@
         <label class="field"><span>开始日期</span><span class="date-input-shell"><input id="entryDateFrom" type="date"></span></label>
         <label class="field"><span>结束日期</span><span class="date-input-shell"><input id="entryDateTo" type="date"></span></label>
       </div>
+      <label class="all-months-toggle"><input id="allMonthsToggle" type="checkbox"><span><b>全部月份</b><small>列表跨月显示，顶部收支仍按当前所选月份计算</small></span></label>
       <button class="primary-button" type="submit">查看结果</button>
     </form>
   </dialog>
@@ -450,7 +462,8 @@
       <p class="sheet-description settings-data-description">导出当前账本和物品付款元数据。照片内容不会进入备份。</p>
       <div class="settings-actions">
         <button class="secondary-button" id="exportButton" type="button">导出资料</button>
-        <label class="secondary-button restore-file-button">导入并恢复备份<input id="restoreFileInput" type="file" accept="application/json,.json" hidden></label>
+        <input class="visually-hidden-file restore-file-input" id="restoreFileInput" type="file" accept="application/json,.json" aria-labelledby="restoreFileButton">
+        <label class="secondary-button restore-file-button" id="restoreFileButton" for="restoreFileInput">导入并恢复备份</label>
         <button class="danger-button" id="signOutButton" type="button">登出</button>
       </div>
       <p class="form-message" id="settingsMessage" aria-live="polite"></p>
