@@ -51,6 +51,10 @@
     <p class="privacy-note" id="privacyNote">正在确认资料储存位置…</p>
 
     <section class="app-view view-overview" data-view="overview" aria-labelledby="viewTitle">
+      <section class="getting-started" id="gettingStarted" aria-labelledby="gettingStartedTitle" hidden>
+        <div class="getting-started-head"><div><p>开始使用</p><h2 id="gettingStartedTitle">完成家庭账本设置</h2></div><button class="icon-button" id="dismissGettingStarted" type="button" aria-label="关闭开始使用清单">×</button></div>
+        <div class="getting-started-list" id="gettingStartedList"></div>
+      </section>
       <div class="overview-primary">
         <article class="balance-panel" aria-labelledby="balanceHeading">
           <div class="section-row balance-heading-row">
@@ -116,7 +120,7 @@
     <section class="app-view" data-view="entries" aria-labelledby="entriesHeading" hidden>
       <div class="view-header">
         <div>
-          <h2 id="entriesHeading">账目</h2>
+          <h2 class="visually-hidden-heading" id="entriesHeading">账目</h2>
           <p>查看每个月的家庭收支</p>
         </div>
         <div class="view-actions">
@@ -133,13 +137,19 @@
         <div><span>收入</span><strong id="ledgerIncomeTotal">RM 0.00</strong></div>
         <div><span>支出</span><strong id="ledgerExpenseTotal">RM 0.00</strong></div>
       </div>
+      <div class="entry-filter-bar" aria-label="搜索与筛选账目">
+        <label class="entry-search"><span class="visually-hidden-heading">搜索账目</span><input id="entrySearchInput" type="search" placeholder="搜索分类、备注、账户或金额"></label>
+        <button class="secondary-button compact" id="openEntryFilters" type="button">筛选</button>
+        <label class="all-months-toggle"><input id="allMonthsToggle" type="checkbox"><span>全部月份</span></label>
+      </div>
+      <div class="filter-status"><span id="entryFilterSummary">0 个结果</span><button class="text-button" id="clearEntryFilters" type="button" hidden>清除</button></div>
       <div class="transaction-list surface-list" id="transactionList" aria-live="polite"></div>
     </section>
 
     <section class="app-view" data-view="accounts" aria-labelledby="accountsHeading" hidden>
       <div class="view-header">
         <div>
-          <h2 id="accountsHeading">账户</h2>
+          <h2 class="visually-hidden-heading" id="accountsHeading">账户</h2>
           <p>余额来自可对账账本</p>
         </div>
         <button class="secondary-button compact" id="newAccountButton" type="button">新增账户</button>
@@ -149,7 +159,7 @@
 
     <section class="app-view items-view" data-view="items" aria-labelledby="itemsHeading" hidden>
       <div class="view-header items-header">
-        <div><h2 id="itemsHeading">物品橱窗</h2><p>收藏想买、分期中与已拥有的物品</p></div>
+        <div><h2 class="visually-hidden-heading" id="itemsHeading">物品橱窗</h2><p>收藏想买、分期中与已拥有的物品</p></div>
         <button class="secondary-button compact" id="newItemButton" data-mutation type="button">新增物品</button>
       </div>
       <fieldset class="segmented items-segmented" aria-label="筛选物品">
@@ -207,6 +217,11 @@
         <label><input type="radio" name="kind" value="income"><span>收入</span></label>
         <label><input type="radio" name="kind" value="transfer"><span>转账</span></label>
       </fieldset>
+      <div class="entry-shortcuts">
+        <button class="minor-button" id="copyPreviousEntry" type="button">复制上一笔</button>
+        <button class="minor-button" id="saveEntryTemplate" type="button">存为常用</button>
+      </div>
+      <div class="entry-template-list" id="entryTemplateList" aria-label="常用账目模板"></div>
       <label class="field amount-field"><span>金额</span><div class="amount-input"><b>RM</b><input id="amountInput" name="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" required></div></label>
       <div class="field business-account-field" id="sourceRow">
         <span id="sourceAccountLabel">账户</span>
@@ -377,6 +392,20 @@
     </form>
   </dialog>
 
+  <dialog id="entryFilterDialog" class="sheet compact-sheet">
+    <form method="dialog" id="entryFilterForm">
+      <div class="sheet-head"><div><p class="sheet-context">组合筛选</p><h2>筛选账目</h2></div><button class="icon-button" type="button" data-close-dialog="entryFilterDialog" aria-label="关闭">×</button></div>
+      <label class="field"><span>类型</span><select id="entryKindFilter"><option value="all">全部</option><option value="income">收入</option><option value="expense">支出</option><option value="transfer">转账</option><option value="repayment">还款</option></select></label>
+      <label class="field"><span>账户</span><select id="entryAccountFilter"><option value="all">全部账户</option></select></label>
+      <label class="field"><span>分类</span><select id="entryCategoryFilter"><option value="all">全部分类</option></select></label>
+      <div class="filter-date-grid">
+        <label class="field"><span>开始日期</span><span class="date-input-shell"><input id="entryDateFrom" type="date"></span></label>
+        <label class="field"><span>结束日期</span><span class="date-input-shell"><input id="entryDateTo" type="date"></span></label>
+      </div>
+      <button class="primary-button" type="submit">查看结果</button>
+    </form>
+  </dialog>
+
   <dialog id="inviteDialog" class="sheet compact-sheet">
     <form method="dialog" id="inviteForm">
       <div class="sheet-head">
@@ -414,12 +443,27 @@
         <label><input type="radio" name="appTheme" value="cimb"><span><i class="theme-swatch cimb" aria-hidden="true"></i><b>CIMB 红</b><small>稳重醒目</small></span></label>
         <label><input type="radio" name="appTheme" value="ocean"><span><i class="theme-swatch ocean" aria-hidden="true"></i><b>深海蓝</b><small>经典金融</small></span></label>
       </fieldset>
+      <section class="settings-section" id="householdMembersSection">
+        <div class="settings-section-head"><div><h3>家庭成员</h3><p>成员状态与待处理邀请</p></div><button class="text-button" id="refreshMembersButton" type="button">重新载入</button></div>
+        <div class="member-list surface-list" id="memberList"><p class="settings-placeholder">载入成员中…</p></div>
+      </section>
       <p class="sheet-description settings-data-description">导出当前账本和物品付款元数据。照片内容不会进入备份。</p>
       <div class="settings-actions">
         <button class="secondary-button" id="exportButton" type="button">导出资料</button>
+        <label class="secondary-button restore-file-button">导入并恢复备份<input id="restoreFileInput" type="file" accept="application/json,.json" hidden></label>
         <button class="danger-button" id="signOutButton" type="button">登出</button>
       </div>
       <p class="form-message" id="settingsMessage" aria-live="polite"></p>
+    </div>
+  </dialog>
+
+  <dialog id="restorePreviewDialog" class="modal compact-modal">
+    <div>
+      <div class="sheet-head"><div><p class="sheet-context">安全恢复预览</p><h2>确认恢复备份</h2></div><button class="icon-button" type="button" data-close-dialog="restorePreviewDialog" aria-label="关闭">×</button></div>
+      <div class="restore-preview" id="restorePreview"></div>
+      <p class="restore-warning">照片不会恢复，需要在恢复完成后重新加入。未确认前不会写入任何资料。</p>
+      <p class="form-message" id="restoreMessage" aria-live="polite"></p>
+      <div class="sheet-actions"><button class="primary-button" id="confirmRestoreButton" type="button">确认并恢复</button><button class="secondary-button" type="button" data-close-dialog="restorePreviewDialog">取消</button></div>
     </div>
   </dialog>
 

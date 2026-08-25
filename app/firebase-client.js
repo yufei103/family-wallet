@@ -13,6 +13,11 @@ import {
 const now = () => new Date().toISOString();
 const cleanEmail = email => String(email ?? '').trim().toLowerCase();
 const cleanRecord = value => JSON.parse(JSON.stringify(value));
+const canonicalRecord = value => {
+  if (Array.isArray(value)) return `[${value.map(canonicalRecord).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalRecord(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+};
 const personalHouseholdId = uid => `personal-${uid}`;
 const normaliseCalendarDate = (value, label = '日期') => {
   if (value === null || value === undefined || value === '') return null;
@@ -658,6 +663,116 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
   const deleteItem = input => mutateDeletedItem(input, 'delete');
   const restoreDeletedItem = input => mutateDeletedItem(input, 'restore');
 
+  function subscribeMembers(householdId, onData, onError) {
+    return onSnapshot(collection(db, 'households', householdId, 'members'), snapshot => {
+      onData(snapshot.docs.map(item => ({ id:item.id, ...item.data() })));
+    }, error => onError?.(error));
+  }
+
+  async function loadPendingInvites(householdId) {
+    const snapshot = await getDocs(query(
+      collection(db, 'invites'),
+      where('householdId', '==', householdId),
+      where('status', '==', 'pending')
+    ));
+    return snapshot.docs.map(item => ({ id:item.id, ...item.data() }));
+  }
+
+  async function setMemberActive({ householdId, memberId, active }) {
+    requireOnline();
+    const reference = doc(db, 'households', householdId, 'members', memberId);
+    const before = await getDoc(reference);
+    if (!before.exists() || before.data().role !== 'member') throw new Error('只能管理普通家庭成员');
+    await updateDoc(reference, { active:Boolean(active) });
+    const readback = await getDoc(reference);
+    if (!readback.exists() || readback.data().active !== Boolean(active)) throw new Error('成员状态回读失败');
+    return { id:readback.id, ...readback.data() };
+  }
+
+  async function cancelInvite({ householdId, inviteEmail }) {
+    requireOnline();
+    const reference = doc(db, 'invites', cleanEmail(inviteEmail));
+    const snapshot = await getDoc(reference);
+    if (!snapshot.exists() || snapshot.data().householdId !== householdId || snapshot.data().status !== 'pending') throw new Error('待处理邀请不存在');
+    const batch = writeBatch(db);
+    batch.delete(reference);
+    await batch.commit();
+    const remaining = await loadPendingInvites(householdId);
+    if (remaining.some(invite => cleanEmail(invite.email) === cleanEmail(inviteEmail))) throw new Error('邀请取消回读失败');
+    return remaining;
+  }
+
+  async function restoreBackupCopy({ identity, validated, user, restoredAt = now() }) {
+    requireOnline();
+    const ownerUid = currentActor(user?.uid);
+    const ownerEmail = cleanEmail(user?.email);
+    const householdId = requiredId(identity?.householdId, '恢复 householdId');
+    const operationId = requiredId(identity?.operationId, '恢复 operationId');
+    const checksum = requiredId(identity?.checksum, '恢复 checksum');
+    const householdReference = doc(db, 'households', householdId);
+    const existingHousehold = await getDoc(householdReference);
+    if (existingHousehold.exists()) {
+      const data = existingHousehold.data();
+      if (data.ownerId !== ownerUid || data.restoreOperationId !== operationId || data.restoreChecksum !== checksum) {
+        throw new Error('恢复目的地 ID 已被其他载荷使用');
+      }
+      if (data.restoreStatus === 'complete') return { householdId, duplicate:true };
+    } else {
+      const initial = writeBatch(db);
+      initial.set(householdReference, {
+        ownerId:ownerUid,
+        name:`恢复副本 · ${restoredAt.slice(0, 10)}`,
+        kind:'restored',
+        createdAt:restoredAt,
+        restoreOperationId:operationId,
+        restoreChecksum:checksum,
+        restoreStatus:'importing'
+      });
+      initial.set(doc(db, 'households', householdId, 'members', ownerUid), {
+        uid:ownerUid, email:ownerEmail, displayName:user?.displayName ?? '', role:'owner', active:true, joinedAt:restoredAt
+      });
+      await initial.commit();
+    }
+
+    const ordered = [
+      ...validated.accounts.map(data => ['accounts', data.id, data]),
+      ...validated.items.map(data => ['items', data.id, data]),
+      ...validated.itemPayments.map(data => ['itemPayments', data.id, data]),
+      ...validated.transactions.map(data => ['transactions', data.id, data])
+    ];
+    for (let offset = 0; offset < ordered.length; offset += 400) {
+      const chunk = ordered.slice(offset, offset + 400);
+      const snapshots = await Promise.all(chunk.map(([collectionName, id]) => getDoc(doc(db, 'households', householdId, collectionName, id))));
+      const batch = writeBatch(db);
+      let writes = 0;
+      chunk.forEach(([collectionName, id, data], index) => {
+        const snapshot = snapshots[index];
+        if (snapshot.exists()) {
+          if (canonicalRecord(snapshot.data()) !== canonicalRecord(data)) throw new Error(`${collectionName}/${id} 已存在不同恢复载荷`);
+          return;
+        }
+        batch.set(doc(db, 'households', householdId, collectionName, id), data);
+        writes += 1;
+      });
+      if (writes) await batch.commit();
+    }
+
+    const finish = writeBatch(db);
+    finish.update(householdReference, { restoreStatus:'complete', restoredAt });
+    finish.update(doc(db, 'users', ownerUid), {
+      householdIds:arrayUnion(householdId),
+      selectedHouseholdId:householdId
+    });
+    await finish.commit();
+    const [householdReadback, profileReadback] = await Promise.all([
+      getDoc(householdReference), getDoc(doc(db, 'users', ownerUid))
+    ]);
+    if (householdReadback.data()?.restoreStatus !== 'complete'
+        || !profileReadback.data()?.householdIds?.includes(householdId)
+        || profileReadback.data()?.selectedHouseholdId !== householdId) throw new Error('恢复完成回读失败');
+    return { householdId, duplicate:false };
+  }
+
   async function inviteMember({ householdId, email, ownerUid, ownerEmail, ownerDisplayName }) {
     const emailLower = cleanEmail(email);
     if (!emailLower || !emailLower.includes('@')) throw new Error('请输入有效的 Gmail');
@@ -759,6 +874,11 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     restoreItem,
     deleteItem,
     restoreDeletedItem,
+    subscribeMembers,
+    loadPendingInvites,
+    setMemberActive,
+    cancelInvite,
+    restoreBackupCopy,
     selectHousehold: (uid, householdId) => updateDoc(doc(db, 'users', uid), { selectedHouseholdId: householdId }),
     inviteMember,
     watchInvite,

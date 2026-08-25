@@ -15,7 +15,7 @@ test('PWA 声明与离线 worker 引用所有首屏模块', async () => {
   const manifestData = JSON.parse(manifest);
   assert.equal(manifestData.display, 'standalone');
   assert.deepEqual(manifestData.icons.map(icon => icon.sizes), ['192x192', '512x512', '512x512']);
-  for (const asset of ['index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js', 'items-view.js', 'cloud-sync.js', 'firebase-config.js', 'firebase-client.js']) assert.match(worker, new RegExp(asset.replace('.', '\\.')));
+  for (const asset of ['index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js', 'items-view.js', 'cloud-sync.js', 'backup-restore.js', 'wallet-features.js', 'firebase-config.js', 'firebase-client.js']) assert.match(worker, new RegExp(asset.replace('.', '\\.')));
   for (const icon of ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png']) assert.match(worker, new RegExp(icon.replace('.', '\\.')));
   assert.match(worker, /self\.skipWaiting\(\)/);
   assert.match(worker, /caches\.keys\(\).*cacheName !== CACHE/s);
@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-22/);
+  assert.match(worker, /family-wallet-v2-cloud-23/);
 });
 
 test('Apple/iPhone 壳层保留五项导航与中央圆形新增入口', async () => {
@@ -115,9 +115,13 @@ test('Service Worker 强制更新资源、导航走网络，并把刷新交给�
   assert.doesNotMatch(worker, /client\.navigate\(/);
 });
 
-test('15 个 Dialog 共用 preparing/open/closing 生命周期，手机短位移且 Receipt 只淡入淡出', async () => {
+test('17 个 Dialog（含筛选和恢复预览）共用 preparing/open/closing 生命周期，手机短位移且 Receipt 只淡入淡出', async () => {
   const [html, main, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
-  assert.equal((html.match(/<dialog\b/g) || []).length, 15);
+  assert.equal((html.match(/<dialog\b/g) || []).length, 17);
+  for (const id of ['entryFilterDialog', 'restorePreviewDialog']) {
+    assert.match(html, new RegExp(`<dialog[^>]*id="${id}"`));
+    assert.match(html, new RegExp(`data-close-dialog="${id}"`));
+  }
   assert.match(styles, /\.sheet\[open\]\s*\{[^}]*align-items:\s*center/);
   assert.match(styles, /\.modal\[open\]\s*\{[^}]*align-items:\s*center/);
   assert.match(styles, /@media \(max-width: 759px\)[\s\S]*\.sheet\[open\], \.modal\[open\]\s*\{[^}]*align-items:\s*flex-end/s);
@@ -315,13 +319,13 @@ test('物品 Tab、上传控件与封面编辑器保持移动端契约', async (
   assert.match(styles, /\.cover-editor-viewport\s*\{[^}]*aspect-ratio:\s*4\s*\/\s*5[^}]*touch-action:\s*none/s);
 });
 
-test('七个 date input 在 50px Safari shell 内垂直居中且保留系统 Picker', async () => {
+test('九个 date input（含筛选范围）在 50px Safari shell 内垂直居中且保留系统 Picker', async () => {
   const [html, styles] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
-  const dateIds = ['dateInput', 'expectedPayoffDate', 'repaymentDate', 'newItemEtaDate', 'newItemDepositDate', 'paymentDate', 'editItemEtaDate'];
+  const dateIds = ['dateInput', 'expectedPayoffDate', 'repaymentDate', 'newItemEtaDate', 'newItemDepositDate', 'paymentDate', 'editItemEtaDate', 'entryDateFrom', 'entryDateTo'];
   for (const id of dateIds) {
     assert.match(html, new RegExp(`<span class="date-input-shell">\\s*<input id="${id}"[^>]*type="date"[^>]*>\\s*<\\/span>`));
   }
-  assert.equal((html.match(/class="date-input-shell"/g) || []).length, 7);
+  assert.equal((html.match(/class="date-input-shell"/g) || []).length, 9);
   assert.doesNotMatch(html, /<span class="date-input-shell">\s*<input id="monthPicker"/);
   const shellRule = styles.match(/\.date-input-shell\s*\{([^}]*)\}/)?.[1] ?? '';
   for (const declaration of [
@@ -362,10 +366,13 @@ test('账目显示账户流向，账户点击先打开当月明细再进入编�
   assert.match(main, /entry\.accountId === account\.id \|\| entry\.targetAccountId === account\.id/);
 });
 
-test('账户明细与全部账目共用日期和新增时间排序，首页不再复制交易列表', async () => {
+test('账户明细、筛选结果与月度账目共用排序，但筛选不改变月度摘要', async () => {
   const main = await readFile(app('./main.js'), 'utf8');
   assert.match(main, /compareEntriesNewestFirst/);
-  assert.equal((main.match(/\.sort\(compareEntriesNewestFirst\)/g) || []).length, 2);
+  assert.equal((main.match(/\.sort\(compareEntriesNewestFirst\)/g) || []).length, 3);
+  assert.match(main, /function filteredEntries\(\)[\s\S]*filterEntries\(liveEntries\(\), \{ \.\.\.entryFilters, month:selectedMonth \}/);
+  assert.match(main, /function renderEntryResults\(\)[\s\S]*const entries = filteredEntries\(\)/);
+  assert.match(main, /const entries = selectedEntries\(\)\.sort\(compareEntriesNewestFirst\);\s*renderEntryResults\(\);\s*renderCategoryOverview\(entries\)/);
   assert.doesNotMatch(main, /recentTransactionList/);
   assert.doesNotMatch(main, /\.sort\(\(a, b\) => b\.occurredAt\.localeCompare\(a\.occurredAt\)\)/);
 });
@@ -690,4 +697,52 @@ test('概览圆环统计真实消费并呈现近期负债与 ETA 事项', async 
   assert.match(styles, /\.account-subtype-options\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)[^}]*min-width:\s*0/s);
   assert.match(styles, /\.account-subtype-options span\s*\{[^}]*min-height:\s*44px/s);
   assert.match(styles, /\.upcoming-action-row\s*\{/);
+});
+
+test('成熟度升级把恢复、成员、筛选、模板、引导与 actor 接到真实 UI 路径', async () => {
+  const [html, main, firebase, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'),
+    readFile(app('./firebase-client.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  for (const id of [
+    'gettingStarted', 'entrySearchInput', 'allMonthsToggle', 'entryFilterDialog', 'entryKindFilter',
+    'entryAccountFilter', 'entryCategoryFilter', 'entryDateFrom', 'entryDateTo', 'copyPreviousEntry',
+    'saveEntryTemplate', 'entryTemplateList', 'householdMembersSection', 'memberList', 'restoreFileInput',
+    'restorePreviewDialog', 'restorePreview', 'confirmRestoreButton'
+  ]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /id="restoreFileInput"[^>]*accept="application\/json,\.json"/);
+  assert.match(main, /createBackupPayload\(\{/);
+  assert.match(main, /validateBackup\(payload,/);
+  assert.match(main, /deterministicImportIdentity\(payload, cloudUser\.uid\)/);
+  assert.match(main, /cloud\.restoreBackupCopy\(\{ identity:request\.identity, validated:request\.validated, user:cloudUser \}\)/);
+  assert.match(main, /replaceLocalAtomically\(\{[\s\S]*downloadCurrent:\(\) => downloadCurrentBackup/);
+  assert.match(main, /function filteredEntries\(\)[\s\S]*filterEntries\(liveEntries\(\)/);
+  assert.match(main, /copyPreviousEntry\(liveEntries\(\)\)/);
+  assert.match(main, /saveEntryTemplate\(localStorage, scope\.userId, scope\.householdId/);
+  assert.match(main, /onboardingState\(\{/);
+  assert.ok((main.match(/visibleActor\(/g) || []).length >= 5);
+  assert.match(main, /if \(!isCurrentOwner\(\)\) \{[\s\S]*householdPendingInvites = \[\][\s\S]*return;[\s\S]*cloud\.loadPendingInvites\(householdId\)/);
+  for (const api of ['subscribeMembers', 'loadPendingInvites', 'setMemberActive', 'cancelInvite', 'restoreBackupCopy']) {
+    assert.match(firebase, new RegExp(api));
+  }
+  assert.match(firebase, /const remaining = await loadPendingInvites\(householdId\)/);
+  for (const selector of ['getting-started', 'entry-filter-bar', 'entry-template-list', 'member-list', 'restore-preview']) {
+    assert.match(styles, new RegExp(`\\.${selector}`));
+  }
+});
+
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 23 候选和受支持 runtime', async () => {
+  const [build, worker, workflow] = await Promise.all([
+    readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
+    readFile(app('../.github/workflows/pages.yml'), 'utf8')
+  ]);
+  for (const module of ['backup-restore.js', 'wallet-features.js']) {
+    assert.match(build, new RegExp(module.replace('.', '\\.')));
+    assert.match(worker, new RegExp(module.replace('.', '\\.')));
+  }
+  assert.match(worker, /family-wallet-v2-cloud-23/);
+  for (const action of [
+    'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
+    'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'
+  ]) assert.match(workflow, new RegExp(action.replace('/', '\\/')));
 });
