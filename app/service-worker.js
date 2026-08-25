@@ -1,7 +1,7 @@
-const CACHE = 'family-wallet-v2-cloud-22';
+const CACHE = 'family-wallet-v2-cloud-27';
 const ASSETS = [
   './', './index.html', './styles.css', './main.js', './ledger.js', './items.js', './item-media.js', './items-view.js', './cloud-sync.js',
-  './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
+  './backup-restore.js', './wallet-features.js', './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
   './icons/favicon-32.png', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'
 ];
 

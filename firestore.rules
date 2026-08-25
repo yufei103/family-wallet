@@ -28,6 +28,12 @@ service cloud.firestore {
     function isOwner(householdId) {
       return approvedOwner() && household(householdId).data.ownerId == request.auth.uid;
     }
+    function isRestoreOwner(householdId) {
+      return isOwner(householdId)
+        && household(householdId).data.restoreStatus == 'importing'
+        && nonEmpty(household(householdId).data.restoreOperationId, 200)
+        && nonEmpty(household(householdId).data.restoreChecksum, 200);
+    }
     function isMember(householdId) {
       return signedIn()
         && member(householdId, request.auth.uid).data.active == true
@@ -484,6 +490,34 @@ service cloud.firestore {
         && validTransactionAccounts(data, householdId)
         && validTransactionKind(data, householdId);
     }
+    function validRestoreItem(data, householdId, itemId) {
+      return isRestoreOwner(householdId)
+        && validItemShape(data, householdId, itemId)
+        && data.coverMediaId == null
+        && data.createdByUid == request.auth.uid
+        && data.updatedByUid == request.auth.uid
+        && (!data.keys().hasAny(['deletedByUid']) || data.deletedByUid == null || data.deletedByUid == request.auth.uid);
+    }
+    function validRestorePayment(data, householdId, paymentId) {
+      return isRestoreOwner(householdId)
+        && validPaymentShape(data, householdId, paymentId)
+        && data.receiptMediaId == null
+        && data.actorUid == request.auth.uid
+        && data.updatedByUid == request.auth.uid
+        && exists(itemPath(householdId, data.itemId));
+    }
+    function validRestoreTransaction(data, householdId, transactionId) {
+      return isRestoreOwner(householdId)
+        && validTransactionShape(data, householdId, transactionId)
+        && data.actorUid == request.auth.uid
+        && (!isLinkedTransaction(data) || (
+          data.sourceType == 'itemPayment'
+          && data.sourcePaymentId != null
+          && exists(paymentPath(householdId, data.sourcePaymentId))
+          && get(paymentPath(householdId, data.sourcePaymentId)).data.itemId == data.sourceItemId
+          && get(paymentPath(householdId, data.sourcePaymentId)).data.transactionId == transactionId
+        ));
+    }
     function isLinkedTransaction(data) { return data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId']); }
     function repaymentIdentityPreserved(after, before) {
       return after.kind == 'repayment'
@@ -567,15 +601,20 @@ service cloud.firestore {
               && request.resource.data.role == 'member'
               && validInviteAcceptance(householdId))
           );
-        allow update, delete: if isOwner(householdId)
+        allow update: if isOwner(householdId)
           && request.resource.data.uid == resource.data.uid
-          && request.resource.data.email == resource.data.email;
+          && request.resource.data.email == resource.data.email
+          && resource.data.role == 'member'
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active']);
+        allow delete: if false;
       }
 
       match /accounts/{accountId} {
         allow read: if isMember(householdId);
-        allow create: if isMember(householdId)
-          && validAccountShape(request.resource.data, householdId, accountId);
+        allow create: if (isMember(householdId) || isRestoreOwner(householdId))
+          && validAccountShape(request.resource.data, householdId, accountId)
+          && (!isRestoreOwner(householdId) || request.resource.data.photoDataUrl == null);
         allow update: if isMember(householdId)
           && validAccountShape(request.resource.data, householdId, accountId)
           && request.resource.data.id == resource.data.id
@@ -585,14 +624,16 @@ service cloud.firestore {
 
       match /items/{itemId} {
         allow read: if isMember(householdId);
-        allow create: if isMember(householdId) && validItemCreate(request.resource.data, householdId, itemId);
+        allow create: if (isMember(householdId) && validItemCreate(request.resource.data, householdId, itemId))
+          || validRestoreItem(request.resource.data, householdId, itemId);
         allow update: if isMember(householdId) && validItemUpdate(request.resource.data, resource.data, householdId, itemId);
         allow delete: if false;
       }
 
       match /itemPayments/{paymentId} {
         allow read: if isMember(householdId);
-        allow create: if isMember(householdId) && validPaymentCreate(request.resource.data, householdId, paymentId);
+        allow create: if (isMember(householdId) && validPaymentCreate(request.resource.data, householdId, paymentId))
+          || validRestorePayment(request.resource.data, householdId, paymentId);
         allow update: if isMember(householdId) && validPaymentUpdate(request.resource.data, resource.data, householdId, paymentId);
         allow delete: if false;
       }
@@ -608,12 +649,13 @@ service cloud.firestore {
 
       match /transactions/{transactionId} {
         allow read: if isMember(householdId);
-        allow create: if isMember(householdId)
-          && validTransactionShape(request.resource.data, householdId, transactionId)
-          && request.resource.data.actorUid == request.auth.uid
-          && (isLinkedTransaction(request.resource.data)
-            ? validLinkedTransaction(request.resource.data, householdId, transactionId)
-            : !request.resource.data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId']));
+        allow create: if (isMember(householdId)
+            && validTransactionShape(request.resource.data, householdId, transactionId)
+            && request.resource.data.actorUid == request.auth.uid
+            && (isLinkedTransaction(request.resource.data)
+              ? validLinkedTransaction(request.resource.data, householdId, transactionId)
+              : !request.resource.data.keys().hasAny(['sourceType', 'sourceItemId', 'sourcePaymentId'])))
+          || validRestoreTransaction(request.resource.data, householdId, transactionId);
         allow update: if isMember(householdId)
           && validTransactionShape(request.resource.data, householdId, transactionId)
           && request.resource.data.id == resource.data.id

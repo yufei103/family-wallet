@@ -2,7 +2,7 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { initializeTestEnvironment, assertSucceeds, assertFails } from '@firebase/rules-unit-testing';
-import { arrayUnion, doc, getDoc, runTransaction, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
+import { arrayUnion, deleteDoc, doc, getDoc, runTransaction, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 
 const projectId = 'family-wallet-v2-emulator';
 const householdId = 'home-kris';
@@ -511,6 +511,73 @@ test('陌生人、跨家庭字段与停用成员均拒绝 items/payments/media',
   await assertFails(setDoc(doc(deactivated, 'households', householdId, 'items', 'blocked'), itemRecord('blocked', {
     createdByUid: 'member-b', updatedByUid: 'member-b'
   })));
+});
+
+test('只有 owner 可停用/启用普通成员和取消邀请，owner 自己不可被停用', async () => {
+  const owner = authDb('owner-a', ownerEmail);
+  const member = authDb('member-b', memberEmail);
+  const memberRef = doc(owner, 'households', householdId, 'members', 'member-b');
+  const ownerRef = doc(owner, 'households', householdId, 'members', 'owner-a');
+  await assertFails(updateDoc(doc(member, 'households', householdId, 'members', 'member-b'), { active:false }));
+  await assertFails(updateDoc(ownerRef, { active:false }));
+  await assertSucceeds(updateDoc(memberRef, { active:false }));
+  await assertFails(getDoc(doc(member, 'households', householdId)));
+  await assertSucceeds(updateDoc(memberRef, { active:true }));
+  await assertSucceeds(getDoc(doc(member, 'households', householdId)));
+
+  const inviteRef = doc(owner, 'invites', 'pending-wife@example.com');
+  await assertSucceeds(setDoc(inviteRef, {
+    email:'pending-wife@example.com', householdId, householdName:'家庭账本', ownerUid:'owner-a', status:'pending',
+    createdAt:T2, acceptedBy:null, acceptedAt:null
+  }));
+  await assertFails(deleteDoc(doc(member, 'invites', 'pending-wife@example.com')));
+  await assertSucceeds(deleteDoc(inviteRef));
+  await env.withSecurityRulesDisabled(async context => {
+    assert.equal((await getDoc(doc(context.firestore(), 'invites', 'pending-wife@example.com'))).exists(), false);
+  });
+});
+
+test('恢复副本只有 approved owner 可两阶段建立，完成前当前 profile 保持不变且媒体写入拒绝', async () => {
+  const owner = authDb('owner-a', ownerEmail);
+  const member = authDb('member-b', memberEmail);
+  const stranger = authDb('stranger-c', 'stranger@gmail.com');
+  const restoreId = 'restored-owner-a-checksum';
+  const householdRef = doc(owner, 'households', restoreId);
+  const ownerMemberRef = doc(owner, 'households', restoreId, 'members', 'owner-a');
+  const initial = writeBatch(owner);
+  initial.set(householdRef, {
+    ownerId:'owner-a', name:'恢复副本 · 2026-08-25', kind:'restored', createdAt:T2,
+    restoreOperationId:'restore:checksum', restoreChecksum:'0123456789abcdef', restoreStatus:'importing'
+  });
+  initial.set(ownerMemberRef, memberRecord('owner-a', ownerEmail, 'owner'));
+  await assertSucceeds(initial.commit());
+
+  const profileRef = doc(owner, 'users', 'owner-a');
+  const before = (await assertSucceeds(getDoc(profileRef))).data();
+  assert.deepEqual(before.householdIds, [householdId]);
+  assert.equal(before.selectedHouseholdId, householdId);
+
+  const restoredAccount = { ...legacyAccountRecord('restore-cash', '恢复现金'), householdId:restoreId };
+  await assertSucceeds(setDoc(doc(owner, 'households', restoreId, 'accounts', 'restore-cash'), restoredAccount));
+  await assertFails(setDoc(doc(owner, 'households', restoreId, 'accounts', 'restore-photo'), {
+    ...restoredAccount, id:'restore-photo', photoDataUrl:JPEG
+  }));
+  await assertFails(setDoc(doc(member, 'households', 'member-restore'), {
+    ownerId:'member-b', name:'伪恢复', kind:'restored', createdAt:T2,
+    restoreOperationId:'restore:member', restoreChecksum:'memberchecksum', restoreStatus:'importing'
+  }));
+  await assertFails(setDoc(doc(stranger, 'households', 'stranger-restore'), {
+    ownerId:'stranger-c', name:'伪恢复', kind:'restored', createdAt:T2,
+    restoreOperationId:'restore:stranger', restoreChecksum:'strangerchecksum', restoreStatus:'importing'
+  }));
+
+  const finish = writeBatch(owner);
+  finish.update(householdRef, { restoreStatus:'complete', restoredAt:T3 });
+  finish.update(profileRef, { householdIds:arrayUnion(restoreId), selectedHouseholdId:restoreId });
+  await assertSucceeds(finish.commit());
+  const afterRestore = (await assertSucceeds(getDoc(profileRef))).data();
+  assert.equal(afterRestore.householdIds.includes(restoreId), true);
+  assert.equal(afterRestore.selectedHouseholdId, restoreId);
 });
 
 test('两个成员并发争抢最终余额时仅一个 transaction 成功', async () => {

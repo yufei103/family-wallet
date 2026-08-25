@@ -13,8 +13,15 @@ import { compressItemMedia, normaliseCoverEditState } from './item-media.js';
 import { createSyncCoordinator } from './cloud-sync.js';
 import {
   describeEtaDate, displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch, normaliseDisplayItem,
-  rawSnapshotHasOperation, renderItemCards, serialiseLocalEnvelope, withoutMediaDataUrls
+  rawSnapshotHasOperation, renderItemCards, serialiseLocalEnvelope
 } from './items-view.js';
+import {
+  MAX_BACKUP_BYTES, createBackupPayload, deterministicImportIdentity, replaceLocalAtomically, validateBackup
+} from './backup-restore.js';
+import {
+  activeFilterSummary, actorLabel, copyPreviousEntry, deleteEntryTemplate, dismissOnboarding, filterEntries,
+  isOnboardingDismissed, loadEntryTemplates, onboardingState, saveEntryTemplate
+} from './wallet-features.js';
 
 const STORE = 'family-wallet-v2-local-demo';
 const ENTRY_PREFS_STORE = 'family-wallet-v2-entry-preferences';
@@ -59,6 +66,7 @@ let pendingInvite = null;
 let stopUserWatch = null;
 let stopHouseholdWatch = null;
 let stopInviteWatch = null;
+let stopMembersWatch = null;
 let stopItemsWatch = null;
 let stopItemPaymentsWatch = null;
 let cloudSessionToken = null;
@@ -84,6 +92,11 @@ let repaymentReturnAccountId = null;
 let requestedPaymentId = null;
 const mediaLoads = new Map();
 const itemActionOperations = new Map();
+let householdMembers = [];
+let householdPendingInvites = [];
+let memberReadGeneration = 0;
+let pendingRestore = null;
+let entryFilters = { keyword:'', kind:'all', accountId:'all', category:'all', dateFrom:'', dateTo:'', allMonths:false };
 
 const syncCoordinator = createSyncCoordinator({
   applyOperation:mergePendingLedgerPatch,
@@ -199,6 +212,7 @@ function applyCoordinatorState(state) {
     currentItemPayments = [];
     renderItemsView();
     restartItemsListener(currentHousehold.id);
+    restartMembersListener(currentHousehold.id);
   }
   $('#inviteMemberButton').hidden = currentHousehold.ownerId !== cloudUser?.uid;
   $('#privacyNote').textContent = `资料已同步到你的个人 Firebase · ${currentHousehold.name}`;
@@ -397,6 +411,12 @@ function monthLabel(value) {
 function typeLabel(kind) { return ({ income:'收入', expense:'支出', transfer:'转账' })[kind] || kind; }
 function senToAmount(value) { return (value / 100).toFixed(2); }
 
+function currentActorUid() { return usesCloudStore() ? cloudUser?.uid : 'local'; }
+function currentScope() {
+  return { userId:currentActorUid() || 'local', householdId:usesCloudStore() ? currentHousehold?.id : 'local' };
+}
+function visibleActor(uidValue) { return actorLabel(uidValue, currentActorUid(), householdMembers); }
+
 function setView(view, scroll = true) {
   if (!viewTitles[view]) return;
   activeView = view;
@@ -550,7 +570,8 @@ function paymentTimelineMarkup(payments) {
         ? `<button class="minor-button" data-restore-payment="${escapeHtml(payment.id)}" type="button">恢复付款</button>`
         : `<button class="minor-button delete" data-void-payment="${escapeHtml(payment.id)}" type="button">作废付款</button>`;
       const menu = `<details class="payment-menu"><summary class="minor-button" aria-label="付款更正菜单">⋯</summary><div class="payment-menu-popover">${correction}</div></details>`;
-      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div><b>${label} · ${formatRM(payment.amountMinor)}</b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${menu}</div></div>`;
+      const actor = visibleActor(payment.actorUid ?? payment.createdBy ?? payment.updatedByUid);
+      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div><b>${label} · ${formatRM(payment.amountMinor)}</b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)} · ${escapeHtml(actor)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${menu}</div></div>`;
     }).join('');
 }
 
@@ -1055,7 +1076,7 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
       const source = accountById(entry.accountId);
       const targetContext = contextAccountId === entry.targetAccountId;
       const shownMinor = targetContext ? entry.principalMinor : entry.amountMinor;
-      const metadata = `${dateLabel(entry.occurredAt)} · ${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'}${entry.interestMinor ? ` · 含利息 ${formatRM(entry.interestMinor)}` : ''}${entry.note ? ` · ${entry.note}` : ''}`;
+      const metadata = `${dateLabel(entry.occurredAt)} · ${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'} · ${visibleActor(entry.actorUid)}${entry.interestMinor ? ` · 含利息 ${formatRM(entry.interestMinor)}` : ''}${entry.note ? ` · ${entry.note}` : ''}`;
       const amountClass = targetContext ? '' : 'expense';
       const amountText = targetContext ? `−欠款 ${formatRM(shownMinor)}` : `−${formatRM(shownMinor)}`;
       return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">还</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span></button>`;
@@ -1070,7 +1091,7 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
       amountClass = outgoing ? 'expense' : '';
       amount = `${outgoing ? '−' : '＋'}${formatRM(entry.amountMinor)}`;
     }
-    const metadata = `${dateLabel(entry.occurredAt)} · ${accountFlowLabel(entry)} · ${entry.note || linkedItem?.name || '无备注'}`;
+    const metadata = `${dateLabel(entry.occurredAt)} · ${accountFlowLabel(entry)} · ${visibleActor(entry.actorUid)} · ${entry.note || linkedItem?.name || '无备注'}`;
     const title = isLinkedItemPayment ? `物品付款${linkedItem ? ` · ${linkedItem.name}` : ''}` : (entry.category || typeLabel(entry.kind));
     const route = isLinkedItemPayment ? ` data-linked-item-id="${escapeHtml(entry.sourceItemId)}" data-linked-payment-id="${escapeHtml(entry.sourcePaymentId)}"` : '';
     const aria = isLinkedItemPayment ? `查看物品付款 ${linkedItem?.name ?? ''}` : `编辑 ${typeLabel(entry.kind)} ${formatRM(entry.amountMinor)}`;
@@ -1406,6 +1427,168 @@ function bindRenderedControls(root = document) {
   root.querySelectorAll('[data-add-entry]').forEach(button => button.addEventListener('click', () => openEntry()));
 }
 
+function hasActiveEntryFilters() {
+  return Boolean(entryFilters.keyword || entryFilters.kind !== 'all' || entryFilters.accountId !== 'all'
+    || entryFilters.category !== 'all' || entryFilters.dateFrom || entryFilters.dateTo || entryFilters.allMonths);
+}
+
+function renderEntryFilterOptions() {
+  const accountSelect = $('#entryAccountFilter');
+  const categorySelect = $('#entryCategoryFilter');
+  accountSelect.innerHTML = '<option value="all">全部账户</option>' + activeAccounts()
+    .map(account => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)}</option>`).join('');
+  const categories = [...new Set(liveEntries().map(entry => String(entry.category || '').trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  categorySelect.innerHTML = '<option value="all">全部分类</option>'
+    + categories.map(category => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join('');
+  if ([...accountSelect.options].some(option => option.value === entryFilters.accountId)) accountSelect.value = entryFilters.accountId;
+  else entryFilters.accountId = 'all';
+  if ([...categorySelect.options].some(option => option.value === entryFilters.category)) categorySelect.value = entryFilters.category;
+  else entryFilters.category = 'all';
+}
+
+function filteredEntries() {
+  return filterEntries(liveEntries(), { ...entryFilters, month:selectedMonth }, ledger.accounts, formatRM)
+    .sort(compareEntriesNewestFirst);
+}
+
+function renderEntryResults() {
+  renderEntryFilterOptions();
+  const entries = filteredEntries();
+  $('#entryFilterSummary').textContent = activeFilterSummary(entryFilters, accountById(entryFilters.accountId)?.name || '', entries.length);
+  $('#clearEntryFilters').hidden = !hasActiveEntryFilters();
+  $('#entrySearchInput').value = entryFilters.keyword;
+  $('#allMonthsToggle').checked = entryFilters.allMonths;
+  $('#transactionList').innerHTML = renderTransactionRows(entries,
+    hasActiveEntryFilters() ? '没有符合筛选的账目' : '这个月还没有账目',
+    hasActiveEntryFilters() ? '调整关键词、日期或其他条件后再试。' : '新增一笔收入、支出或转账后，会在这里显示。');
+  bindRenderedControls($('#transactionList'));
+}
+
+function isCurrentOwner() {
+  return usesCloudStore() && Boolean(cloudUser?.uid) && currentHousehold?.ownerId === cloudUser.uid;
+}
+
+function renderOnboarding() {
+  const panel = $('#gettingStarted');
+  const scope = currentScope();
+  const state = onboardingState({
+    accounts:ledger.accounts,
+    transactions:ledger.transactions,
+    isOwner:isCurrentOwner(),
+    hasSharedHousehold:currentHousehold?.kind === 'shared' || householdMembers.some(member => member.role === 'member'),
+    hasInvite:householdPendingInvites.length > 0
+  });
+  const hidden = state.complete || isOnboardingDismissed(localStorage, scope.userId, scope.householdId);
+  panel.hidden = hidden;
+  if (hidden) return;
+  const next = state.steps.find(step => !step.complete);
+  $('#gettingStartedList').innerHTML = `<div class="getting-started-steps">${state.steps.map(step =>
+    `<span class="getting-started-step ${step.complete ? 'complete' : ''}"><i aria-hidden="true">${step.complete ? '✓' : '○'}</i>${escapeHtml(step.label)}</span>`
+  ).join('')}</div>${next ? `<button class="primary-button compact-onboarding-cta" type="button" data-onboarding-action="${next.action}">${escapeHtml(next.label)}</button>` : ''}`;
+  panel.querySelector('[data-onboarding-action]')?.addEventListener('click', event => {
+    const action = event.currentTarget.dataset.onboardingAction;
+    if (action === 'account') openAccount();
+    else if (action === 'entry') openEntry();
+    else openInviteDialog();
+  });
+}
+
+function memberDisplayMarkup(member) {
+  const title = String(member.displayName || member.email || '家庭成员');
+  const subtitle = member.displayName && member.email ? member.email : '';
+  return `<span class="member-main"><b>${escapeHtml(title)}</b>${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ''}</span>`;
+}
+
+function renderMembers() {
+  const list = $('#memberList');
+  if (!usesCloudStore()) {
+    list.innerHTML = '<div class="member-row"><span class="member-main"><b>你</b><small>本机账本</small></span><span class="member-status">本机</span></div>';
+    $('#refreshMembersButton').hidden = true;
+    return;
+  }
+  $('#refreshMembersButton').hidden = false;
+  if (!currentHousehold) {
+    list.innerHTML = '<p class="settings-placeholder">载入成员中…</p>';
+    return;
+  }
+  const owner = isCurrentOwner();
+  const rows = householdMembers.map(member => {
+    const status = member.role === 'owner' ? 'owner' : member.active === false ? 'disabled' : 'active';
+    const label = status === 'owner' ? '建立者' : status === 'disabled' ? '已停用' : '已启用';
+    const manageable = owner && member.role === 'member' && member.uid !== cloudUser?.uid;
+    const action = manageable
+      ? `<button class="minor-button member-action" type="button" data-member-id="${escapeHtml(member.uid)}" data-member-active="${member.active === false}">${member.active === false ? '启用' : '停用'}</button>` : '';
+    return `<div class="member-row" data-member-status="${status}">${memberDisplayMarkup(member)}<span class="member-status">${label}</span>${action}</div>`;
+  });
+  for (const invite of householdPendingInvites) {
+    const action = owner ? `<button class="minor-button member-action delete" type="button" data-cancel-invite="${escapeHtml(invite.email)}">取消邀请</button>` : '';
+    rows.push(`<div class="member-row" data-member-status="pending"><span class="member-main"><b>${escapeHtml(invite.email)}</b><small>等待对方接受</small></span><span class="member-status">待加入</span>${action}</div>`);
+  }
+  list.innerHTML = rows.join('') || '<div class="empty-state"><b>尚无成员资料</b><p>重新载入后仍为空，请检查网络连接。</p></div>';
+  list.querySelectorAll('[data-member-id]').forEach(button => button.addEventListener('click', async () => {
+    const member = householdMembers.find(candidate => candidate.uid === button.dataset.memberId);
+    const active = button.dataset.memberActive === 'true';
+    if (!member || !confirm(`${active ? '启用' : '停用'}「${member.displayName || member.email || '这位成员'}」？`)) return;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    try {
+      const readback = await cloud.setMemberActive({ householdId:currentHousehold.id, memberId:member.uid, active });
+      householdMembers = householdMembers.map(candidate => candidate.uid === readback.uid ? readback : candidate);
+      renderMembers(); renderOnboarding();
+      showToast(active ? '成员已启用。' : '成员已停用。');
+    } catch (error) {
+      $('#settingsMessage').textContent = `成员状态更新失败：${error.message}`;
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+    }
+  }));
+  list.querySelectorAll('[data-cancel-invite]').forEach(button => button.addEventListener('click', async () => {
+    const email = button.dataset.cancelInvite;
+    if (!confirm(`取消发送给 ${email} 的邀请？`)) return;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    try {
+      householdPendingInvites = await cloud.cancelInvite({ householdId:currentHousehold.id, inviteEmail:email });
+      renderMembers(); renderOnboarding();
+      showToast('邀请已取消。');
+    } catch (error) {
+      $('#settingsMessage').textContent = `取消邀请失败：${error.message}`;
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+    }
+  }));
+}
+
+function restartMembersListener(householdId) {
+  stopMembersWatch?.();
+  stopMembersWatch = null;
+  householdMembers = [];
+  householdPendingInvites = [];
+  const generation = ++memberReadGeneration;
+  renderMembers();
+  if (!usesCloudStore() || !householdId) return;
+  stopMembersWatch = cloud.subscribeMembers(householdId, members => {
+    if (generation !== memberReadGeneration || householdId !== desiredHouseholdId) return;
+    householdMembers = members;
+    renderMembers(); renderOnboarding(); render();
+  }, error => {
+    if (generation === memberReadGeneration) $('#memberList').innerHTML = `<div class="error-state">成员载入失败：${escapeHtml(error.message)}</div>`;
+  });
+  if (!isCurrentOwner()) {
+    householdPendingInvites = [];
+    renderMembers(); renderOnboarding();
+    return;
+  }
+  cloud.loadPendingInvites(householdId).then(invites => {
+    if (generation !== memberReadGeneration || householdId !== desiredHouseholdId) return;
+    householdPendingInvites = invites;
+    renderMembers(); renderOnboarding();
+  }).catch(error => {
+    if (generation === memberReadGeneration) $('#settingsMessage').textContent = `邀请载入失败：${error.message}`;
+  });
+}
+
 function render() {
   const totals = householdTotals(ledger);
   const summary = monthlySummary(ledger, selectedMonth);
@@ -1430,11 +1613,12 @@ function render() {
   $('#accountList').innerHTML = accounts.length ? renderAccountGroups(accounts) : '<div class="empty-state"><b>还没有账户</b><p>新增现金、银行或信用卡账户，开始建立家庭账本。</p><button class="secondary-button" type="button" data-new-account>新增账户</button></div>';
 
   const entries = selectedEntries().sort(compareEntriesNewestFirst);
-  $('#transactionList').innerHTML = renderTransactionRows(entries, '这个月还没有账目', '新增一笔收入、支出或转账后，会在这里显示。');
+  renderEntryResults();
 
   renderCategoryOverview(entries);
   renderItemsView();
   renderUpcomingActions();
+  renderOnboarding();
 
   bindRenderedControls();
   if (selectedAccountDetailId && $('#accountDetailDialog').open) renderAccountDetail();
@@ -1707,6 +1891,64 @@ function updateKindState() {
   $('#categoryRow').hidden = transfer;
   accountPicker.close();
   populateEntryAccounts(kind, $('#sourceAccount').value, $('#targetAccount').value);
+  if ($('#entryShortcutsDialog').open) renderEntryTemplates();
+}
+
+function currentEntryKind() {
+  return document.querySelector('input[name="kind"]:checked').value;
+}
+
+function applyEntryBusinessFields(values, feedback) {
+  if (!values || !['income', 'expense', 'transfer'].includes(values.kind)) return;
+  document.querySelector(`input[name="kind"][value="${values.kind}"]`).checked = true;
+  updateKindState();
+  if (entryAccounts(values.kind).some(account => account.id === values.accountId)) $('#sourceAccount').value = values.accountId;
+  if (values.kind === 'transfer' && assetAccounts().some(account => account.id === values.targetAccountId && account.id !== $('#sourceAccount').value)) {
+    $('#targetAccount').value = values.targetAccountId;
+  }
+  accountPicker.sync('source');
+  accountPicker.sync('target');
+  $('#amountInput').value = Number.isSafeInteger(values.amountMinor) ? senToAmount(values.amountMinor) : '';
+  selectCategory(values.kind === 'transfer' ? '' : values.category || '');
+  $('#noteInput').value = values.note || '';
+  $('#dateInput').value = today();
+  $('#entryMessage').textContent = feedback;
+  $('#entryMessage').classList.add('success');
+  $('#amountInput').focus();
+  $('#amountInput').select();
+}
+
+function renderEntryTemplates() {
+  const list = $('#entryTemplateList');
+  const kind = currentEntryKind();
+  const kindLabel = typeLabel(kind);
+  $('#entryShortcutsTitle').textContent = `${kindLabel}快捷方式`;
+  const scope = currentScope();
+  const templates = loadEntryTemplates(localStorage, scope.userId, scope.householdId, kind);
+  list.innerHTML = templates.length ? templates.map(template =>
+    `<div class="entry-template-row"><button class="entry-template-apply" type="button" data-template-id="${escapeHtml(template.id)}"><b>${escapeHtml(template.name)}</b><small>${escapeHtml(typeLabel(template.kind))} · ${formatRM(template.amountMinor)}</small></button><button class="entry-template-delete" type="button" data-delete-template="${escapeHtml(template.id)}" aria-label="删除 ${escapeHtml(template.name)}">×</button></div>`
+  ).join('') : `<p class="entry-template-empty">还没有${escapeHtml(kindLabel)}常用模板。可先填写表单，再存为常用。</p>`;
+  list.querySelectorAll('[data-template-id]').forEach(button => button.addEventListener('click', () => {
+    const template = templates.find(candidate => candidate.id === button.dataset.templateId);
+    dismissDialog($('#entryShortcutsDialog'), () => applyEntryBusinessFields(template, `已套用「${template?.name || '常用账目'}」，请确认后保存。`));
+  }));
+  list.querySelectorAll('[data-delete-template]').forEach(button => button.addEventListener('click', () => {
+    deleteEntryTemplate(localStorage, scope.userId, scope.householdId, button.dataset.deleteTemplate);
+    renderEntryTemplates();
+    $('#entryShortcutMessage').textContent = '常用账目已删除。';
+  }));
+}
+
+function currentEntryTemplate() {
+  const kind = document.querySelector('input[name="kind"]:checked').value;
+  const amountMinor = amountToSen($('#amountInput').value);
+  const category = kind === 'transfer' ? '' : $('#categoryInput').value.trim();
+  if (kind !== 'transfer' && !category) throw new Error('请先选择分类');
+  return {
+    id:uid('template'), kind, amountMinor, category, note:$('#noteInput').value.trim(),
+    accountId:$('#sourceAccount').value || null,
+    targetAccountId:kind === 'transfer' ? ($('#targetAccount').value || null) : null
+  };
 }
 
 function openEntry(id = null) {
@@ -1735,11 +1977,13 @@ function openEntry(id = null) {
   accountPicker.close();
   $('#saveEntryButton').disabled = false;
   $('#entryMessage').textContent = '';
+  $('#entryMessage').classList.remove('success');
   $('#entryForm').reset();
   $('#editingTransactionId').value = entry?.id || '';
   $('#entryDialogTitle').textContent = entry ? '编辑账目' : '新增账目';
   $('#saveEntryButton').textContent = entry ? '保存修改' : '保存账目';
   $('#archiveTransactionButton').hidden = !entry;
+  $('#openEntryShortcuts').hidden = Boolean(entry);
 
   if (entry) {
     document.querySelector(`input[name="kind"][value="${entry.kind}"]`).checked = true;
@@ -1760,6 +2004,7 @@ function openEntry(id = null) {
     $('#dateInput').value = today();
   }
 
+  renderEntryTemplates();
   showDialog($('#entryDialog'), () => $('#amountInput').focus());
 }
 
@@ -1935,8 +2180,8 @@ function renderRecycle() {
   const deletedEntries = ledger.transactions
     .filter(entry => entry.deletedAt && entry.sourceType !== 'itemPayment')
     .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
-  const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">物</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button" data-restore-deleted-item="${escapeHtml(item.id)}">恢复物品</button></div></div></div>`).join('');
-  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">−</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button" data-restore="${escapeHtml(entry.id)}">恢复</button><button class="minor-button delete" data-delete="${escapeHtml(entry.id)}">永久删除</button></div></div></div>`).join('');
+  const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">物</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · ${escapeHtml(visibleActor(item.deletedByUid ?? item.deletedBy))} · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button" data-restore-deleted-item="${escapeHtml(item.id)}">恢复物品</button></div></div></div>`).join('');
+  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">−</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(visibleActor(entry.actorUid))} · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button" data-restore="${escapeHtml(entry.id)}">恢复</button><button class="minor-button delete" data-delete="${escapeHtml(entry.id)}">永久删除</button></div></div></div>`).join('');
   $('#recycleList').innerHTML = itemMarkup || entryMarkup
     ? `${itemMarkup}${entryMarkup}`
     : '<div class="empty-state"><b>回收站是空的</b><p>移除的普通账目和物品会显示在这里。</p></div>';
@@ -1963,34 +2208,111 @@ function renderRecycle() {
   }));
 }
 
+async function currentBackupPayload() {
+  const payments = usesCloudStore()
+    ? await cloud.loadAllItemPayments(currentHousehold.id)
+    : serialiseItemsState(itemsState).itemPayments;
+  return createBackupPayload({
+    householdName:usesCloudStore() ? currentHousehold.name : '本机账本',
+    ledger,
+    items:itemRecords,
+    itemPayments:payments
+  });
+}
+
+function downloadBackupPayload(payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `family-wallet-backup-${today()}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+async function downloadCurrentBackup({ closeSettings = false } = {}) {
+  const payload = await currentBackupPayload();
+  downloadBackupPayload(payload);
+  if (closeSettings) dismissDialog($('#settingsDialog'));
+  return payload;
+}
+
 async function exportLocal() {
   const button = $('#exportButton');
   button.disabled = true;
   $('#settingsMessage').textContent = '';
   try {
-    const payments = usesCloudStore()
-      ? await cloud.loadAllItemPayments(currentHousehold.id)
-      : serialiseItemsState(itemsState).itemPayments;
-    const payload = withoutMediaDataUrls({
-      schemaVersion:2,
-      exportedAt:new Date().toISOString(),
-      household:usesCloudStore() ? { id:currentHousehold.id, name:currentHousehold.name } : { id:'local', name:'本机账本' },
-      ledger:serialiseLedger(ledger),
-      items:itemRecords,
-      itemPayments:payments
-    });
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `family-wallet-backup-${today()}.json`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    dismissDialog($('#settingsDialog'));
-    showToast('已导出 schemaVersion 2 资料；照片内容未包含。');
+    await downloadCurrentBackup({ closeSettings:true });
+    showToast('已导出可校验备份；照片内容未包含。');
   } catch (error) {
     $('#settingsMessage').textContent = `无法导出：${error.message}`;
   } finally {
     button.disabled = false;
+  }
+}
+
+function renderRestorePreview(validated, mode) {
+  const counts = validated.counts;
+  const modeCopy = mode === 'cloud'
+    ? '<b>云端恢复方式</b><p>会建立新的恢复副本，不覆盖当前账本。成功后会切换并重新载入恢复副本。</p>'
+    : '<b>本机恢复方式</b><p>会先自动下载当前账本备份，再原子替换本机资料并重新载入。失败时保留原账本。</p>';
+  $('#restorePreview').innerHTML = `<div class="restore-ledger-name"><span>账本名称</span><strong>${escapeHtml(validated.sourceName)}</strong></div><div class="restore-counts"><span><b>${counts.accounts}</b>账户</span><span><b>${counts.transactions}</b>账目</span><span><b>${counts.items}</b>物品</span><span><b>${counts.itemPayments}</b>付款</span></div><div class="restore-mode-copy">${modeCopy}</div>`;
+}
+
+async function prepareRestoreFile(file) {
+  if (!file) return;
+  if (file.size <= 0 || file.size > MAX_BACKUP_BYTES) throw new Error('只可选择不超过 5MB 的 JSON 备份');
+  if (!file.name.toLowerCase().endsWith('.json') && file.type !== 'application/json') throw new Error('请选择 JSON 备份文件');
+  if (usesCloudStore() && (!cloudUser || !cloudProfile || !isCurrentOwner())) {
+    throw new Error('云端只有当前账本建立者可以恢复；家庭成员可查看资料，但不能建立恢复副本');
+  }
+  const text = await file.text();
+  let payload;
+  try { payload = JSON.parse(text); }
+  catch { throw new Error('JSON 文件已损坏'); }
+  const mode = usesCloudStore() ? 'cloud' : 'local';
+  const identity = mode === 'cloud' ? await deterministicImportIdentity(payload, cloudUser.uid) : null;
+  const validated = await validateBackup(payload, {
+    destinationHouseholdId:identity?.householdId ?? 'local-restored',
+    ownerUid:cloudUser?.uid ?? 'local',
+    byteLength:file.size
+  });
+  pendingRestore = { mode, payload, identity, validated };
+  renderRestorePreview(validated, mode);
+  $('#restoreMessage').textContent = '';
+  $('#confirmRestoreButton').disabled = false;
+  showDialog($('#restorePreviewDialog'), () => $('#confirmRestoreButton').focus());
+}
+
+async function confirmRestore() {
+  if (!pendingRestore) return;
+  const request = pendingRestore;
+  const button = $('#confirmRestoreButton');
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.textContent = '恢复中…';
+  $('#restoreMessage').textContent = '';
+  try {
+    if (request.mode === 'cloud') {
+      if (!cloudUser || !cloudProfile || !isCurrentOwner()) throw new Error('只有当前账本建立者可以恢复云端备份');
+      const result = await cloud.restoreBackupCopy({ identity:request.identity, validated:request.validated, user:cloudUser });
+      if (result.householdId !== request.identity.householdId) throw new Error('恢复副本回读不一致');
+      const refreshUrl = new URL(location.href);
+      refreshUrl.searchParams.set('wallet-restored', result.householdId);
+      location.replace(refreshUrl.href);
+    } else {
+      await replaceLocalAtomically({
+        storage:localStorage,
+        storeKey:STORE,
+        validated:request.validated,
+        downloadCurrent:() => downloadCurrentBackup({ closeSettings:false })
+      });
+      location.reload();
+    }
+  } catch (error) {
+    $('#restoreMessage').textContent = `恢复失败：${error.message}。当前账本未切换。`;
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    button.textContent = '确认并恢复';
   }
 }
 
@@ -2062,6 +2384,7 @@ $('#moreButton').addEventListener('click', () => {
 $('#openSettingsButton').addEventListener('click', () => {
   dismissDialog($('#topbarActionsDialog'), () => {
     $('#settingsMessage').textContent = '';
+    renderMembers();
     showDialog($('#settingsDialog'));
   });
 });
@@ -2473,10 +2796,102 @@ $('#removeAccountPhotoButton').addEventListener('click', () => {
 });
 $('#viewAllEntriesButton').addEventListener('click', () => setView('entries'));
 $('#exportButton').addEventListener('click', exportLocal);
+$('#restoreFileInput').addEventListener('change', async event => {
+  const file = event.target.files?.[0] ?? null;
+  $('#settingsMessage').textContent = '';
+  try { await prepareRestoreFile(file); }
+  catch (error) { $('#settingsMessage').textContent = `无法预览备份：${error.message}`; }
+  finally { event.target.value = ''; }
+});
+$('#confirmRestoreButton').addEventListener('click', confirmRestore);
+$('#restorePreviewDialog').addEventListener('close', () => {
+  pendingRestore = null;
+  $('#confirmRestoreButton').disabled = false;
+  $('#confirmRestoreButton').removeAttribute('aria-busy');
+  $('#confirmRestoreButton').textContent = '确认并恢复';
+});
 $('#recycleButton').addEventListener('click', () => { renderRecycle(); showDialog($('#recycleDialog')); });
 $('#closeRecycleButton').addEventListener('click', () => dismissDialog($('#recycleDialog')));
 $('#monthFilterButton').addEventListener('click', () => showDialog($('#monthDialog')));
 $('#overviewMonthButton').addEventListener('click', () => showDialog($('#monthDialog')));
+$('#entrySearchInput').addEventListener('input', event => {
+  entryFilters.keyword = event.target.value;
+  renderEntryResults();
+});
+$('#openEntryFilters').addEventListener('click', () => {
+  renderEntryFilterOptions();
+  $('#entryKindFilter').value = entryFilters.kind;
+  $('#entryAccountFilter').value = entryFilters.accountId;
+  $('#entryCategoryFilter').value = entryFilters.category;
+  $('#entryDateFrom').value = entryFilters.dateFrom;
+  $('#entryDateTo').value = entryFilters.dateTo;
+  $('#allMonthsToggle').checked = entryFilters.allMonths;
+  showDialog($('#entryFilterDialog'), () => $('#entryKindFilter').focus());
+});
+$('#entryFilterForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const dateFrom = $('#entryDateFrom').value;
+  const dateTo = $('#entryDateTo').value;
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    showToast('开始日期不能晚于结束日期。');
+    return;
+  }
+  entryFilters = {
+    ...entryFilters,
+    kind:$('#entryKindFilter').value,
+    accountId:$('#entryAccountFilter').value,
+    category:$('#entryCategoryFilter').value,
+    dateFrom,
+    dateTo,
+    allMonths:$('#allMonthsToggle').checked
+  };
+  dismissDialog($('#entryFilterDialog'));
+  renderEntryResults();
+});
+$('#clearEntryFilters').addEventListener('click', () => {
+  entryFilters = { keyword:'', kind:'all', accountId:'all', category:'all', dateFrom:'', dateTo:'', allMonths:false };
+  renderEntryResults();
+  $('#entrySearchInput').focus();
+});
+$('#openEntryShortcuts').addEventListener('click', () => {
+  $('#entryShortcutMessage').textContent = '';
+  renderEntryTemplates();
+  showDialog($('#entryShortcutsDialog'), () => $('#copyPreviousEntry').focus());
+});
+$('#copyPreviousEntry').addEventListener('click', () => {
+  const kind = currentEntryKind();
+  const copy = copyPreviousEntry(liveEntries(), kind);
+  if (!copy) {
+    $('#entryShortcutMessage').textContent = `还没有可复制的${typeLabel(kind)}。`;
+    return;
+  }
+  dismissDialog($('#entryShortcutsDialog'), () => applyEntryBusinessFields(copy, `已复制上一笔${typeLabel(kind)}，日期已改为今天，请确认后保存。`));
+});
+$('#saveEntryTemplate').addEventListener('click', () => {
+  $('#entryShortcutMessage').classList.remove('success');
+  try {
+    const template = currentEntryTemplate();
+    const suggested = template.note || template.category || '常用账目';
+    const name = prompt('给这个常用账目取名', suggested);
+    if (name === null) return;
+    const scope = currentScope();
+    saveEntryTemplate(localStorage, scope.userId, scope.householdId, { ...template, name:name.trim() || suggested });
+    renderEntryTemplates();
+    $('#entryShortcutMessage').textContent = '已存为常用账目，不会自动提交。';
+    $('#entryShortcutMessage').classList.add('success');
+  } catch (error) {
+    $('#entryShortcutMessage').textContent = error.message;
+  }
+});
+$('#dismissGettingStarted').addEventListener('click', () => {
+  const scope = currentScope();
+  dismissOnboarding(localStorage, scope.userId, scope.householdId);
+  renderOnboarding();
+});
+$('#refreshMembersButton').addEventListener('click', () => {
+  if (usesCloudStore() && currentHousehold) restartMembersListener(currentHousehold.id);
+  else renderMembers();
+});
 $('#monthPicker').addEventListener('change', event => {
   if (!event.target.value) return;
   selectedMonth = event.target.value;
@@ -2658,6 +3073,9 @@ function switchCloudHousehold(householdId, { persistSelection = false } = {}) {
   setSwitching(true);
   setSyncState('切换中', false, 'loading');
   stopItemListeners();
+  stopMembersWatch?.();
+  stopMembersWatch = null;
+  memberReadGeneration += 1;
   if ($('#itemDetailDialog').open) closeItemDetail();
   currentListenerToken = syncCoordinator.activateHousehold(cloudSessionToken, householdId);
   restartHouseholdListener(currentListenerToken, householdId);
@@ -2684,12 +3102,16 @@ async function handleCloudUser(user) {
   stopUserWatch?.();
   stopInviteWatch?.();
   stopHouseholdWatch?.();
+  stopMembersWatch?.();
   stopItemListeners();
   if ($('#itemDetailDialog').open) {
     cleanupItemDetail();
     dismissDialog($('#itemDetailDialog'));
   }
-  stopUserWatch = stopInviteWatch = stopHouseholdWatch = null;
+  stopUserWatch = stopInviteWatch = stopHouseholdWatch = stopMembersWatch = null;
+  householdMembers = [];
+  householdPendingInvites = [];
+  memberReadGeneration += 1;
   currentHousehold = null;
   desiredHouseholdId = null;
   currentListenerToken = null;
@@ -2841,6 +3263,16 @@ async function startRuntime() {
     showAuth('尚未连接你的个人 Firebase。这里不会要求或保存 Firebase Token。');
     return;
   }
+  const firebaseWebHost = `${firebaseConfig.projectId}.web.app`;
+  const firebaseAuthHost = `${firebaseConfig.projectId}.firebaseapp.com`;
+  if (!useEmulators && location.hostname === firebaseWebHost) {
+    const canonicalUrl = new URL(location.href);
+    canonicalUrl.hostname = firebaseAuthHost;
+    canonicalUrl.protocol = 'https:';
+    canonicalUrl.port = '';
+    location.replace(canonicalUrl.href);
+    return;
+  }
   const { createFirebaseWallet } = await import('./firebase-client.js');
   runtimeMode = useEmulators ? 'emulator' : 'cloud';
   showAuth(useEmulators ? '正在初始化本机 Firebase Emulator…' : '正在检查 Google 登录状态…');
@@ -2849,8 +3281,10 @@ async function startRuntime() {
     if (useEmulators) $('#testAuthControls').hidden = false;
     else $('#googleSignInButton').hidden = Boolean(user);
     handleCloudUser(user).catch(error => {
-      if (!useEmulators) $('#googleSignInButton').hidden = false;
-      showAuth(error.message);
+      if (!useEmulators) $('#googleSignInButton').hidden = Boolean(user);
+      showAuth(user
+        ? `Google 登录仍然有效，但账本暂时无法打开：${error.message}。请刷新后重试。`
+        : error.message);
     });
   });
 }

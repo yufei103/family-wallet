@@ -6,7 +6,8 @@ const source = resolve(root, 'app');
 const output = resolve(root, 'dist');
 const required = [
   'index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js',
-  'items-view.js', 'cloud-sync.js', 'firebase-client.js', 'service-worker.js', 'manifest.webmanifest'
+  'items-view.js', 'cloud-sync.js', 'backup-restore.js', 'wallet-features.js',
+  'firebase-client.js', 'service-worker.js', 'manifest.webmanifest'
 ];
 const iconFiles = ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 const configKeys = {
