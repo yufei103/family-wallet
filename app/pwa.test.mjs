@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-23/);
+  assert.match(worker, /family-wallet-v2-cloud-25/);
 });
 
 test('Apple/iPhone 壳层保留五项导航与中央圆形新增入口', async () => {
@@ -464,6 +464,11 @@ test('正式入口包含 Google 登录、个人/家庭账本选择、Gmail 邀�
   assert.match(main, /button\.setAttribute\('aria-busy', 'true'\)/);
   assert.match(main, /Google 登录窗口已打开，请在该窗口完成登录/);
   assert.match(main, /正在检查 Google 登录状态/);
+  assert.match(main, /const firebaseWebHost = `\$\{firebaseConfig\.projectId\}\.web\.app`/);
+  assert.match(main, /const firebaseAuthHost = `\$\{firebaseConfig\.projectId\}\.firebaseapp\.com`/);
+  assert.match(main, /location\.hostname === firebaseWebHost[\s\S]*canonicalUrl\.hostname = firebaseAuthHost[\s\S]*location\.replace\(canonicalUrl\.href\)[\s\S]*return/);
+  assert.match(main, /Google 登录仍然有效，但账本暂时无法打开/);
+  assert.match(main, /handleCloudUser\(user\)\.catch\(error => \{[\s\S]*googleSignInButton'\)\.hidden = Boolean\(user\)/);
   assert.match(main, /cloud\.onAuthChanged\(user => \{[\s\S]*googleSignInButton'\)\.hidden = Boolean\(user\)/);
   assert.doesNotMatch(config, /private_key|serviceAccount|accessToken/i);
 });
@@ -731,7 +736,7 @@ test('成熟度升级把恢复、成员、筛选、模板、引导与 actor 接�
   }
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 23 候选和受支持 runtime', async () => {
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 25 候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -740,7 +745,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 23 候选和�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-23/);
+  assert.match(worker, /family-wallet-v2-cloud-25/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'

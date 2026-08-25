@@ -3258,6 +3258,16 @@ async function startRuntime() {
     showAuth('尚未连接你的个人 Firebase。这里不会要求或保存 Firebase Token。');
     return;
   }
+  const firebaseWebHost = `${firebaseConfig.projectId}.web.app`;
+  const firebaseAuthHost = `${firebaseConfig.projectId}.firebaseapp.com`;
+  if (!useEmulators && location.hostname === firebaseWebHost) {
+    const canonicalUrl = new URL(location.href);
+    canonicalUrl.hostname = firebaseAuthHost;
+    canonicalUrl.protocol = 'https:';
+    canonicalUrl.port = '';
+    location.replace(canonicalUrl.href);
+    return;
+  }
   const { createFirebaseWallet } = await import('./firebase-client.js');
   runtimeMode = useEmulators ? 'emulator' : 'cloud';
   showAuth(useEmulators ? '正在初始化本机 Firebase Emulator…' : '正在检查 Google 登录状态…');
@@ -3266,8 +3276,10 @@ async function startRuntime() {
     if (useEmulators) $('#testAuthControls').hidden = false;
     else $('#googleSignInButton').hidden = Boolean(user);
     handleCloudUser(user).catch(error => {
-      if (!useEmulators) $('#googleSignInButton').hidden = false;
-      showAuth(error.message);
+      if (!useEmulators) $('#googleSignInButton').hidden = Boolean(user);
+      showAuth(user
+        ? `Google 登录仍然有效，但账本暂时无法打开：${error.message}。请刷新后重试。`
+        : error.message);
     });
   });
 }
