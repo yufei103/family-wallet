@@ -1,4 +1,4 @@
-const CACHE = 'family-wallet-v2-cloud-27';
+const CACHE = 'family-wallet-v2-cloud-28';
 const ASSETS = [
   './', './index.html', './styles.css', './main.js', './ledger.js', './items.js', './item-media.js', './items-view.js', './cloud-sync.js',
   './backup-restore.js', './wallet-features.js', './firebase-config.js', './firebase-client.js', './manifest.webmanifest',

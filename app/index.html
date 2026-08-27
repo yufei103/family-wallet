@@ -35,7 +35,36 @@
     </div>
   </section>
 
+  <aside class="desktop-sidebar desktop-only" id="desktopSidebar" aria-label="桌面主要导航" hidden>
+    <div class="desktop-brand">
+      <span class="desktop-brand-mark" aria-hidden="true">FW</span>
+      <div><b>Family Wallet</b><small>家庭财务工作区</small></div>
+    </div>
+    <nav class="desktop-nav" aria-label="工作区导航">
+      <p>账本</p>
+      <button class="desktop-nav-item active" data-view-target="overview" type="button" aria-current="page">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12l-2 0l9 -9l9 9l-2 0M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/></svg><span>概览</span>
+      </button>
+      <button class="desktop-nav-item" data-view-target="accounts" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg><span>账户</span>
+      </button>
+      <button class="desktop-nav-item" data-view-target="entries" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 21v-16a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v16l-3 -2l-2 2l-2 -2l-2 2l-2 -2l-3 2M9 7h6M9 11h6M13 15h2"/></svg><span>账目</span>
+      </button>
+      <button class="desktop-nav-item" data-view-target="items" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14h-16zM8 9h8M8 13h8M8 17h5"/></svg><span>物品</span>
+      </button>
+    </nav>
+    <div class="desktop-sidebar-footer">
+      <button class="desktop-nav-item" id="desktopSettingsButton" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1l-2.8 2.8l-.1-.1a1.7 1.7 0 0 0 -1.9-.3a1.7 1.7 0 0 0 -1 1.6v.2h-4v-.2a1.7 1.7 0 0 0 -1-1.6a1.7 1.7 0 0 0 -1.9.3l-.1.1l-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9a1.7 1.7 0 0 0 -1.6-1h-.2v-4h.2a1.7 1.7 0 0 0 1.6-1a1.7 1.7 0 0 0 -.3-1.9l-.1-.1l2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3a1.7 1.7 0 0 0 1-1.6v-.2h4v.2a1.7 1.7 0 0 0 1 1.6a1.7 1.7 0 0 0 1.9-.3l.1-.1l2.8 2.8l-.1.1a1.7 1.7 0 0 0 -.3 1.9a1.7 1.7 0 0 0 1.6 1h.2v4h-.2a1.7 1.7 0 0 0 -1.6 1z"/></svg><span>设置与数据</span>
+      </button>
+      <p id="desktopFreshness">资料状态会显示在顶部</p>
+    </div>
+  </aside>
+
   <main class="app-shell" id="appShell" hidden>
+    <div class="workspace-toolbar">
     <header class="topbar">
       <div class="topbar-copy">
         <p class="app-name">Family Wallet</p>
@@ -43,6 +72,7 @@
       </div>
       <div class="topbar-actions">
         <select class="workspace-select" id="workspaceSelect" aria-label="选择个人或家庭账本"></select>
+        <button class="primary-button desktop-context-action desktop-only" id="desktopContextAction" type="button">新增账目</button>
         <button class="icon-button more-button" id="moreButton" type="button" aria-label="打开更多操作" aria-haspopup="dialog" aria-controls="topbarActionsDialog" title="更多操作">⋯</button>
       </div>
     </header>
@@ -50,6 +80,7 @@
     <div class="sync-status-row" aria-label="资料储存与同步状态">
       <p class="privacy-note" id="privacyNote">正在确认资料储存位置…</p>
       <button class="local-badge" id="syncBadge" type="button" aria-label="同步状态；已同步时点按可刷新 App">准备中</button>
+    </div>
     </div>
 
     <section class="app-view view-overview" data-view="overview" aria-labelledby="viewTitle">
@@ -144,7 +175,10 @@
         <button class="secondary-button compact" id="openEntryFilters" type="button">筛选</button>
       </div>
       <div class="filter-status"><span id="entryFilterSummary">0 个结果</span><button class="text-button" id="clearEntryFilters" type="button" hidden>清除</button></div>
-      <div class="transaction-list surface-list" id="transactionList" aria-live="polite"></div>
+      <div class="desktop-table-shell">
+        <div class="desktop-entry-table-head desktop-only" aria-hidden="true"><span>日期</span><span>类型／分类</span><span>账户流向／备注</span><span>记录人</span><span>金额</span></div>
+        <div class="transaction-list surface-list" id="transactionList" aria-live="polite"></div>
+      </div>
     </section>
 
     <section class="app-view" data-view="accounts" aria-labelledby="accountsHeading" hidden>
@@ -154,6 +188,11 @@
           <p>余额来自可对账账本</p>
         </div>
         <button class="secondary-button compact" id="newAccountButton" type="button">新增账户</button>
+      </div>
+      <div class="desktop-account-summary desktop-only" aria-label="账户汇总">
+        <span>计入资产<strong id="desktopAccountAssets">RM 0.00</strong></span>
+        <span>计入负债<strong id="desktopAccountLiabilities">RM 0.00</strong></span>
+        <span>家庭净额<strong id="desktopAccountNet">RM 0.00</strong></span>
       </div>
       <div class="account-list" id="accountList" aria-live="polite"></div>
     </section>
