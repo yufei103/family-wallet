@@ -43,7 +43,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-27/);
+  assert.match(worker, /family-wallet-v2-cloud-28/);
 });
 
 test('Apple/iPhone 壳层保留五项导航与中央圆形新增入口', async () => {
@@ -391,13 +391,45 @@ test('账户照片在本机压缩、预览、保存与移除', async () => {
   assert.match(styles, /\.account-photo-preview img\s*\{[^}]*object-fit:\s*cover/);
 });
 
-test('桌面断点使用左侧导航与宽内容区，手机规则保持独立', async () => {
-  const styles = await readFile(app('./styles.css'), 'utf8');
+test('桌面断点使用完整侧栏、统一工具栏与有界工作区，手机规则保持独立', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  const sidebar = html.match(/<aside class="desktop-sidebar desktop-only"[\s\S]*?<\/aside>/)?.[0] ?? '';
+  assert.match(sidebar, /id="desktopSidebar"[^>]*hidden/);
+  assert.deepEqual([...sidebar.matchAll(/data-view-target="([^"]+)"/g)].map(match => match[1]), ['overview', 'accounts', 'entries', 'items']);
+  assert.match(sidebar, /id="desktopSettingsButton"/);
+  assert.match(html, /class="workspace-toolbar"[\s\S]*id="viewTitle"[\s\S]*id="workspaceSelect"[\s\S]*id="desktopContextAction"[\s\S]*id="privacyNote"[\s\S]*id="syncBadge"/);
+  assert.match(main, /#desktopContextAction[\s\S]*activeView === 'accounts'[\s\S]*openAccount\(\)[\s\S]*activeView === 'items'[\s\S]*openNewItem\(\)[\s\S]*openEntry\(\)/);
   assert.match(styles, /@media \(min-width: 1024px\)\s*\{/);
-  assert.match(styles, /width:\s*min\(calc\(100% - 190px\), 1180px\)/);
-  assert.match(styles, /\.bottom-nav\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(styles, /--desktop-sidebar-width:\s*232px/);
+  assert.match(styles, /\.desktop-sidebar\s*\{[^}]*position:\s*fixed[^}]*width:\s*var\(--desktop-sidebar-width\)/s);
+  assert.match(styles, /\.app-shell\s*\{[^}]*max-width:\s*1440px/s);
+  assert.match(styles, /margin:\s*0 auto 0 calc\(var\(--desktop-sidebar-width\) \+ max\(0px, \(100vw - var\(--desktop-sidebar-width\) - 1440px\) \/ 2\)\)/);
+  assert.match(styles, /#bottomNav\s*\{[^}]*display:\s*none !important/s);
+  assert.match(styles, /\.desktop-only\s*\{\s*display:\s*none !important/);
+  assert.match(styles, /@media \(min-width: 1024px\)[\s\S]*\.desktop-only\s*\{[^}]*display:\s*revert !important/s);
   assert.match(styles, /@media \(max-width: 420px\)\s*\{/);
   assert.match(styles, /\.bottom-nav(?:, \.new-entry-accessory)?\s*\{\s*width:\s*calc\(100% - 16px\);\s*\}/);
+});
+
+test('桌面账户与账目使用连续比较行，并把明细和编辑器表现为右侧工作面板', async () => {
+  const [html, main, styles] = await Promise.all([
+    readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')
+  ]);
+  assert.match(html, /class="desktop-entry-table-head desktop-only"[^>]*>[\s\S]*日期[\s\S]*类型／分类[\s\S]*账户流向／备注[\s\S]*记录人[\s\S]*金额/);
+  for (const token of ['desktop-entry-date', 'desktop-entry-kind', 'desktop-entry-flow', 'desktop-entry-actor', 'desktop-entry-amount']) assert.match(main, new RegExp(token));
+  for (const token of ['desktop-account-table-head', 'desktop-account-name', 'desktop-account-type', 'desktop-account-balance', 'desktop-account-included']) assert.match(main, new RegExp(token));
+  assert.match(styles, /\.desktop-entry-table-head,\s*\n\s*\.transaction-row\s*\{[^}]*grid-template-columns:/s);
+  assert.match(styles, /\.desktop-account-table-head,\s*\n\s*\.account-row\s*\{[^}]*grid-template-columns:/s);
+  assert.match(styles, /\.app-view\[data-view="accounts"\] > \.view-header #newAccountButton,[\s\S]*\.items-header #newItemButton\s*\{\s*display:\s*none/);
+  assert.match(styles, /\.desktop-account-table-head,\s*\n\s*\.account-row\s*\{[^}]*column-gap:\s*16px/s);
+  assert.match(styles, /\.account-row\s*\{[^}]*row-gap:\s*0[^}]*column-gap:\s*16px/s);
+  assert.match(styles, /\.desktop-account-table-head span:nth-child\(4\), \.desktop-account-included\s*\{[^}]*padding-left:\s*16px[^}]*border-left:/s);
+  assert.match(styles, /\.items-empty\s*\{[^}]*width:\s*min\(100%, 760px\)[^}]*min-height:\s*180px/s);
+  assert.match(styles, /#entryDialog\[open\], #accountDialog\[open\], #accountDetailDialog\[open\], #itemDetailDialog\[open\]\s*\{[^}]*justify-content:\s*flex-end/s);
+  assert.match(styles, /#entryDialog > form, #accountDialog > form, #accountDetailDialog > div, #itemDetailDialog > div\s*\{[^}]*height:\s*100dvh[^}]*border-radius:\s*16px 0 0 16px/s);
+  assert.match(styles, /@media \(max-width: 759px\)[\s\S]*\.sheet > form, \.sheet > div, \.modal > form, \.modal > div,[\s\S]*border-radius:\s*20px 20px 0 0/s);
 });
 
 test('账目明细可从列表进入编辑，并在编辑表单中安全移入回收站', async () => {
@@ -792,7 +824,7 @@ test('Maybank 手机 Dialog 不把 Safari 26 底栏染黄，账户分组没有�
   assert.doesNotMatch(styles, /\.sheet-actions\s*\{[^}]*background:\s*linear-gradient/s);
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 27 候选和受支持 runtime', async () => {
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 28 候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -801,7 +833,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 27 候选和�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-27/);
+  assert.match(worker, /family-wallet-v2-cloud-28/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'

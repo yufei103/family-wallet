@@ -151,6 +151,7 @@ function persist() {
 function showApp() {
   $('#authGate').hidden = true;
   $('#appShell').hidden = false;
+  $('#desktopSidebar').hidden = false;
   $('#bottomNav').hidden = false;
 }
 
@@ -158,6 +159,7 @@ function showAuth(message) {
   $('#authMessage').textContent = message;
   $('#authGate').hidden = false;
   $('#appShell').hidden = true;
+  $('#desktopSidebar').hidden = true;
   $('#bottomNav').hidden = true;
 }
 
@@ -166,6 +168,8 @@ function setSyncState(message, bad = false, state = '') {
   badge.textContent = message;
   badge.classList.toggle('bad', bad);
   badge.dataset.state = state;
+  const freshness = $('#desktopFreshness');
+  if (freshness) freshness.textContent = `资料状态：${message}`;
 }
 
 function renderSyncStatus(state = syncCoordinator.getState()) {
@@ -190,7 +194,7 @@ function renderSyncStatus(state = syncCoordinator.getState()) {
 
 function setSwitching(value) {
   document.body.classList.toggle('is-switching', value);
-  for (const control of document.querySelectorAll('[data-mutation], #newEntryButton, #newAccountButton, #archiveTransactionButton, #archiveAccountButton')) {
+  for (const control of document.querySelectorAll('[data-mutation], #newEntryButton, #newAccountButton, #desktopContextAction, #archiveTransactionButton, #archiveAccountButton')) {
     control.disabled = Boolean(value);
   }
   $('#workspaceSelect').setAttribute('aria-busy', String(Boolean(value)));
@@ -428,6 +432,8 @@ function setView(view, scroll = true) {
     else button.removeAttribute('aria-current');
   });
   $('#viewTitle').textContent = viewTitles[view];
+  const contextAction = $('#desktopContextAction');
+  if (contextAction) contextAction.textContent = view === 'accounts' ? '新增账户' : view === 'items' ? '新增物品' : '新增账目';
   const activeSection = document.querySelector(`[data-view="${view}"]`);
   document.querySelectorAll('[data-view-transition]').forEach(section => section.removeAttribute('data-view-transition'));
   activeSection?.setAttribute('data-view-transition', 'entering');
@@ -1079,7 +1085,8 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
       const metadata = `${dateLabel(entry.occurredAt)} · ${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'} · ${visibleActor(entry.actorUid)}${entry.interestMinor ? ` · 含利息 ${formatRM(entry.interestMinor)}` : ''}${entry.note ? ` · ${entry.note}` : ''}`;
       const amountClass = targetContext ? '' : 'expense';
       const amountText = targetContext ? `−欠款 ${formatRM(shownMinor)}` : `−${formatRM(shownMinor)}`;
-      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">还</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span></button>`;
+      const desktopFlow = `${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'}${entry.note ? ` · ${entry.note}` : ''}`;
+      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">还</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>还款</b><small>${escapeHtml(target?.name ?? '负债账户')}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amountText}</span></button>`;
     }
     const isLinkedItemPayment = entry.sourceType === 'itemPayment';
     const linkedItem = isLinkedItemPayment ? itemById(entry.sourceItemId) : null;
@@ -1095,7 +1102,8 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
     const title = isLinkedItemPayment ? `物品付款${linkedItem ? ` · ${linkedItem.name}` : ''}` : (entry.category || typeLabel(entry.kind));
     const route = isLinkedItemPayment ? ` data-linked-item-id="${escapeHtml(entry.sourceItemId)}" data-linked-payment-id="${escapeHtml(entry.sourcePaymentId)}"` : '';
     const aria = isLinkedItemPayment ? `查看物品付款 ${linkedItem?.name ?? ''}` : `编辑 ${typeLabel(entry.kind)} ${formatRM(entry.amountMinor)}`;
-    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${sign}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span></button>`;
+    const desktopFlow = `${accountFlowLabel(entry)} · ${entry.note || linkedItem?.name || '无备注'}`;
+    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${sign}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>${escapeHtml(title)}</b><small>${escapeHtml(typeLabel(entry.kind))}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amount}</span></button>`;
   }).join('');
 }
 
@@ -1227,7 +1235,7 @@ function accountRowMarkup(account) {
     ? '<span class="account-total-status">计入家庭净额</span>'
     : '<span class="account-total-status excluded">不计入总额</span>';
   const type = subtype === 'loan' ? loanTypeLabel(account) : accountSubtypeLabel(account);
-  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${escapeHtml(type)} ${totalStatus}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="row-chevron">${chevronIcon}</span></button>`;
+  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${escapeHtml(type)} ${totalStatus}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="row-chevron">${chevronIcon}</span><span class="desktop-account-cell desktop-account-name desktop-only"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><b>${escapeHtml(account.name)}</b></span><span class="desktop-account-cell desktop-account-type desktop-only">${escapeHtml(type)}</span><span class="desktop-account-cell desktop-account-balance desktop-only"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="desktop-account-cell desktop-account-included desktop-only">${totalStatus}</span><span class="desktop-account-cell desktop-account-open desktop-only">${chevronIcon}</span></button>`;
 }
 
 function renderAccountGroups(accounts) {
@@ -1236,7 +1244,7 @@ function renderAccountGroups(accounts) {
     ['信用卡', accounts.filter(account => accountSubtype(account) === 'credit_card')],
     ['贷款与其他负债', accounts.filter(account => ['loan', 'generic_liability'].includes(accountSubtype(account)))]
   ];
-  return `<div class="account-groups">${groups.filter(([, rows]) => rows.length).map(([title, rows]) => `<section class="account-group"><div class="account-group-heading"><h3>${title}</h3><span>${rows.length} 个账户</span></div><div class="account-group-list">${rows.map(accountRowMarkup).join('')}</div></section>`).join('')}</div>`;
+  return `<div class="account-groups">${groups.filter(([, rows]) => rows.length).map(([title, rows]) => `<section class="account-group"><div class="account-group-heading"><h3>${title}</h3><span>${rows.length} 个账户</span></div><div class="desktop-account-table-head desktop-only" aria-hidden="true"><span>账户</span><span>类型</span><span>余额／欠款</span><span>计入状态</span><span></span></div><div class="account-group-list">${rows.map(accountRowMarkup).join('')}</div></section>`).join('')}</div>`;
 }
 
 function accountDetailAmountSize(amountMinor) {
@@ -1602,6 +1610,9 @@ function render() {
   $('#expenseTotal').textContent = formatRM(summary.expenseMinor);
   $('#ledgerIncomeTotal').textContent = formatRM(summary.incomeMinor);
   $('#ledgerExpenseTotal').textContent = formatRM(summary.expenseMinor);
+  $('#desktopAccountAssets').textContent = formatRM(totals.assetsMinor);
+  $('#desktopAccountLiabilities').textContent = formatRM(totals.liabilitiesMinor);
+  $('#desktopAccountNet').textContent = formatRM(totals.netMinor);
   $('#monthLabel').textContent = monthText;
   $('#monthPicker').value = selectedMonth;
 
@@ -2381,12 +2392,23 @@ document.querySelectorAll('dialog').forEach(dialog => {
 $('#moreButton').addEventListener('click', () => {
   showDialog($('#topbarActionsDialog'));
 });
+function openSettingsDialog() {
+  $('#settingsMessage').textContent = '';
+  renderMembers();
+  showDialog($('#settingsDialog'));
+}
 $('#openSettingsButton').addEventListener('click', () => {
   dismissDialog($('#topbarActionsDialog'), () => {
     $('#settingsMessage').textContent = '';
     renderMembers();
     showDialog($('#settingsDialog'));
   });
+});
+$('#desktopSettingsButton').addEventListener('click', openSettingsDialog);
+$('#desktopContextAction').addEventListener('click', () => {
+  if (activeView === 'accounts') openAccount();
+  else if (activeView === 'items') openNewItem();
+  else openEntry();
 });
 $('#syncBadge').addEventListener('click', () => {
   if (runtimeMode === 'local') {
