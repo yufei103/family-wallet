@@ -41,8 +41,9 @@ const seed = () => createLedger({ accounts: [
 
 const viewTitles = { overview:'概览', entries:'账目', accounts:'账户', items:'物品' };
 const viewIconFamilies = { overview:'nav-home', accounts:'nav-accounts', entries:'nav-entries', items:'nav-items' };
-const transactionIconEndpoints = Object.freeze({
-  income:'income-arrow', expense:'expense-arrow', transfer:'transfer-arrows', repayment:'payment-arrow', item:'package-check'
+const CATEGORY_ICON_ENDPOINTS = Object.freeze({
+  薪水:'category-salary', 购物:'category-shopping', 医疗:'category-medical', 房贷:'category-mortgage',
+  电费:'category-electric', 税费:'category-tax', 打油:'category-fuel', 汽车:'category-car', 其它:'category-other'
 });
 const dialogInvokers = new WeakMap();
 
@@ -54,8 +55,19 @@ function setStateIcon(root, state) {
   icon.dataset.iconState = target.state;
 }
 
-function transactionIconMarkup(state) {
-  return staticIconMarkup(transactionIconEndpoints[state] ?? 'neutral');
+function entryIconEndpoint(entry) {
+  if (entry?.sourceType === 'itemPayment') return 'package-check';
+  if (entry?.kind === 'repayment') return 'payment-arrow';
+  if (entry?.kind === 'transfer') return 'transfer-arrows';
+  const category = String(entry?.category || '').trim();
+  if (category) return CATEGORY_ICON_ENDPOINTS[category] ?? 'category-other';
+  if (entry?.kind === 'income') return 'income-arrow';
+  if (entry?.kind === 'expense') return 'expense-arrow';
+  return 'neutral';
+}
+
+function transactionIconMarkup(entry) {
+  return staticIconMarkup(entryIconEndpoint(entry));
 }
 
 const hydratedLocal = hydrate();
@@ -1586,7 +1598,7 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
       const amountClass = targetContext ? '' : 'expense';
       const amountText = targetContext ? `−欠款 ${formatRM(shownMinor)}` : `−${formatRM(shownMinor)}`;
       const desktopFlow = `${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'}${entry.note ? ` · ${entry.note}` : ''}`;
-      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">${stateIconMarkup('transaction', 'repayment')}</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>还款</b><small>${escapeHtml(target?.name ?? '负债账户')}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amountText}</span></button>`;
+      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">${transactionIconMarkup(entry)}</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>还款</b><small>${escapeHtml(target?.name ?? '负债账户')}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amountText}</span></button>`;
     }
     const isLinkedItemPayment = entry.sourceType === 'itemPayment';
     const linkedItem = isLinkedItemPayment ? itemById(entry.sourceItemId) : null;
@@ -1603,7 +1615,7 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
     const route = isLinkedItemPayment ? ` data-linked-item-id="${escapeHtml(entry.sourceItemId)}" data-linked-payment-id="${escapeHtml(entry.sourcePaymentId)}"` : '';
     const aria = isLinkedItemPayment ? `查看物品付款 ${linkedItem?.name ?? ''}` : `编辑 ${typeLabel(entry.kind)} ${formatRM(entry.amountMinor)}`;
     const desktopFlow = `${accountFlowLabel(entry)} · ${entry.note || linkedItem?.name || '无备注'}`;
-    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${stateIconMarkup('transaction', isLinkedItemPayment ? 'item' : entry.kind)}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>${escapeHtml(title)}</b><small>${escapeHtml(typeLabel(entry.kind))}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amount}</span></button>`;
+    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${transactionIconMarkup(entry)}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>${escapeHtml(title)}</b><small>${escapeHtml(typeLabel(entry.kind))}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amount}</span></button>`;
   }).join('');
 }
 
@@ -2757,7 +2769,7 @@ function renderRecycle() {
     .filter(entry => entry.deletedAt && entry.sourceType !== 'itemPayment')
     .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
   const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">${stateIconMarkup('recycle', 'idle')}</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · ${escapeHtml(visibleActor(item.deletedByUid ?? item.deletedBy))} · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button icon-label-button" data-restore-deleted-item="${escapeHtml(item.id)}">${stateIconMarkup('recycle', 'restore')}<span>恢复物品</span></button></div></div></div>`).join('');
-  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">${stateIconMarkup('transaction', entry.kind === 'repayment' ? 'repayment' : entry.kind)}</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(visibleActor(entry.actorUid))} · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button icon-label-button" data-restore="${escapeHtml(entry.id)}">${stateIconMarkup('recycle', 'restore')}<span>恢复</span></button><button class="minor-button delete icon-label-button" data-delete="${escapeHtml(entry.id)}">${staticIconMarkup('trash')}<span>永久删除</span></button></div></div></div>`).join('');
+  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">${transactionIconMarkup(entry)}</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(visibleActor(entry.actorUid))} · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button icon-label-button" data-restore="${escapeHtml(entry.id)}">${stateIconMarkup('recycle', 'restore')}<span>恢复</span></button><button class="minor-button delete icon-label-button" data-delete="${escapeHtml(entry.id)}">${staticIconMarkup('trash')}<span>永久删除</span></button></div></div></div>`).join('');
   $('#recycleList').innerHTML = itemMarkup || entryMarkup
     ? `${itemMarkup}${entryMarkup}`
     : '<div class="empty-state"><b>回收站是空的</b><p>移除的普通账目和物品会显示在这里。</p></div>';

@@ -49,7 +49,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-29/);
+  assert.match(worker, /family-wallet-v2-cloud-30/);
 });
 
 test('Morphicons PWA foundation is pinned, self-hosted, progressive and framework-free', async () => {
@@ -932,7 +932,7 @@ test('Maybank 手机 Dialog 不把 Safari 26 底栏染黄，账户分组没有�
   assert.doesNotMatch(styles, /\.sheet-actions\s*\{[^}]*background:\s*linear-gradient/s);
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 29 候选和受支持 runtime', async () => {
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 30 候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -941,7 +941,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 29 候选和�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-29/);
+  assert.match(worker, /family-wallet-v2-cloud-30/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'

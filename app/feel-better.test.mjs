@@ -374,3 +374,35 @@ test('Stage 2B2 320px layout, 44px correction/retry targets and reduced motion r
   assert.match(reduced, /\.media-status\s*\{[^}]*transition:\s*none !important/s);
   assert.doesNotMatch(styles, /\binfinite\b|action-state-spin/);
 });
+
+test('saved entries reuse the fixed editor category icons and never fall back to the crossed square', async () => {
+  const { main } = await sources();
+  const iconData = await readFile(app('./state-icon-data.js'), 'utf8');
+  const iconBlock = main.slice(main.indexOf('const CATEGORY_ICON_ENDPOINTS'), main.indexOf('const hydratedLocal'));
+  const endpointFor = Function(`${iconBlock}; return entryIconEndpoint;`)();
+
+  assert.deepEqual({
+    salary:endpointFor({ kind:'income', category:'薪水' }),
+    shopping:endpointFor({ kind:'expense', category:'购物' }),
+    medical:endpointFor({ kind:'expense', category:'医疗' }),
+    mortgage:endpointFor({ kind:'expense', category:'房贷' }),
+    electric:endpointFor({ kind:'expense', category:'电费' }),
+    tax:endpointFor({ kind:'expense', category:'税费' }),
+    fuel:endpointFor({ kind:'expense', category:'打油' }),
+    car:endpointFor({ kind:'expense', category:'汽车' }),
+    custom:endpointFor({ kind:'expense', category:'自定义旧分类' }),
+    transfer:endpointFor({ kind:'transfer', category:null }),
+    repayment:endpointFor({ kind:'repayment', category:null }),
+    item:endpointFor({ kind:'expense', category:'购物', sourceType:'itemPayment' })
+  }, {
+    salary:'category-salary', shopping:'category-shopping', medical:'category-medical', mortgage:'category-mortgage',
+    electric:'category-electric', tax:'category-tax', fuel:'category-fuel', car:'category-car', custom:'category-other',
+    transfer:'transfer-arrows', repayment:'payment-arrow', item:'package-check'
+  });
+
+  for (const endpoint of ['category-salary', 'category-shopping', 'category-medical', 'category-mortgage', 'category-electric', 'category-tax', 'category-fuel', 'category-car', 'category-other']) {
+    assert.match(iconData, new RegExp(`['"]${endpoint}['"]\\s*:`), `${endpoint} must resolve to a fixed local SVG endpoint`);
+  }
+  assert.ok((main.match(/transactionIconMarkup\(entry\)/g) || []).length >= 3, 'ledger rows, repayments and recycle rows must share the safe mapper');
+  assert.doesNotMatch(main, /stateIconMarkup\('transaction'/, 'the missing transaction family previously rendered the crossed-square fallback');
+});
