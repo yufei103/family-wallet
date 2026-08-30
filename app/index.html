@@ -20,7 +20,7 @@
     <div class="auth-card">
       <p class="app-name">Family Wallet</p>
       <h1>你的家庭账本</h1>
-      <p id="authMessage">正在检查登录状态…</p>
+      <p class="feedback-row auth-feedback" id="authMessage">正在检查登录状态…</p>
       <button class="google-button" id="googleSignInButton" type="button" hidden>使用 Google 帐号登录</button>
       <div class="test-auth" id="testAuthControls" hidden>
         <label class="field"><span>测试邮箱</span><input id="testEmail" type="email" autocomplete="username" value="owner@example.com"></label>
@@ -682,7 +682,10 @@
     </section>
   </dialog>
 
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="toast" id="toast" data-tone="neutral" role="status" aria-live="polite" aria-atomic="true">
+    <span class="feedback-icon" data-feedback-icon aria-hidden="true"></span>
+    <span data-toast-text></span>
+  </div>
   <script type="module" src="./main.js"></script>
   <script type="module" src="./state-icon-motion.js"></script>
 </body>

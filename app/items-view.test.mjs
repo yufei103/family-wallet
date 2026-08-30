@@ -4,7 +4,7 @@ import { createLedger } from './ledger.js';
 import { createItemsState, createItem, recordItemPayment } from './items.js';
 import {
   LOCAL_SCHEMA_VERSION, describeEtaDate, displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch,
-  normaliseDisplayItem, rawSnapshotHasOperation, renderItemCards, serialiseLocalEnvelope,
+  normaliseDisplayItem, rawSnapshotHasOperation, renderItemCards, renderItemsLoadingState, serialiseLocalEnvelope,
   withoutMediaDataUrls
 } from './items-view.js';
 
@@ -108,6 +108,21 @@ test('物品封面占位与状态只使用固定本地图标注册表，储存�
   assert.match(html, /data-state-icon="item-lifecycle" data-icon-state="idle"/);
   assert.doesNotMatch(html, /data-state-icon="trash"|data-static-icon="trash"/);
   assert.doesNotMatch(html, />FW</);
+});
+
+test('物品载入与封面失败有独立状态，并提供独立封面重试控制', () => {
+  assert.match(renderItemsLoadingState(), /class="items-loading-state"[^>]*data-loading-state="loading"[^>]*role="status"/);
+  assert.match(renderItemsLoadingState('物品载入失败', 'error'), /data-loading-state="error"[\s\S]*物品载入失败/);
+  const html = renderItemCards([
+    { id:'camera', name:'相机', fullPriceMinor:10000, paidMinor:0, coverMediaId:'cover-1' }
+  ], {
+    formatMoney:value => `RM ${(value / 100).toFixed(2)}`,
+    householdId:'home',
+    mediaErrors:new Map([['home/cover-1', new Error('broken')]])
+  });
+  assert.match(html, /data-retry-cover="cover-1"/);
+  assert.match(html, /data-retry-item="camera"/);
+  assert.match(html, /class="item-card-open"[^>]*data-item-id="camera"/);
 });
 
 test('备份递归移除照片 Data URL 与图片字段但保留业务元数据', () => {

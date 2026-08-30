@@ -154,6 +154,8 @@ test('Service Worker 强制更新资源、导航走网络，并把刷新交给�
   assert.match(main, /\.then\(registration => registration\.update\(\)\)/);
   assert.match(main, /navigator\.serviceWorker\.addEventListener\('message', handleWalletUpdateMessage\)/);
   assert.match(main, /document\.querySelector\('dialog\[open\]'\)/);
+  assert.match(main, /event\.data\?\.type !== 'FAMILY_WALLET_UPDATE_READY'/);
+  assert.match(main, /if \(hasOpenWalletDialog\(\)\) \{[\s\S]*setSyncState\('更新就绪，完成当前操作后刷新', false, 'update'\)[\s\S]*setAttribute\('role', 'status'\)[\s\S]*setAttribute\('aria-live', 'polite'\)[\s\S]*return;/);
   assert.match(main, /dialog\.addEventListener\('close', \(\) => \{[\s\S]*?applyPendingWalletUpdate\(\);\s*\}\);/);
   assert.match(main, /location\.replace\(refreshUrl\.href\)/);
   assert.match(worker, /cache\.addAll\(ASSETS\.map\(asset => new Request\(asset, \{ cache:'reload' \}\)\)\)/);
@@ -748,7 +750,7 @@ test('还款使用单一 ledger operation 与正常 transaction 同步路径', a
   assert.match(main, /interestMinor:breakdown\.interestMinor/);
   assert.match(main, /applyLedgerOperation\(ledger, \{ id:pendingRepayment\.operationId, \.\.\.changes \}\)/);
   assert.match(main, /saveTransactionRecord\(next, transactionId\)/);
-  assert.match(main, /moveToRecycleBin\(ledger, pendingRepayment\.transactionId/);
+  assert.match(main, /const transactionId = pendingRepayment\.transactionId;[\s\S]*moveToRecycleBin\(ledger, transactionId/);
   assert.match(main, /既有还款不能直接覆写，请移入回收站后重新记录/);
   assert.match(main, /saveRepaymentButton'\)\.hidden = reviewing/);
   assert.match(main, /form\.querySelectorAll\('input, select'\).*control\.disabled = true/s);
@@ -859,7 +861,12 @@ test('成熟度升级把恢复、成员、筛选、模板、引导与 actor 接�
   assert.match(main, /saveEntryTemplate\(localStorage, scope\.userId, scope\.householdId/);
   assert.match(main, /onboardingState\(\{/);
   assert.ok((main.match(/visibleActor\(/g) || []).length >= 5);
-  assert.match(main, /if \(!isCurrentOwner\(\)\) \{[\s\S]*householdPendingInvites = \[\][\s\S]*return;[\s\S]*cloud\.loadPendingInvites\(householdId\)/);
+  assert.match(main, /const generation = \+\+memberReadGeneration/);
+  assert.match(main, /membersKnown:false, invitesKnown:!owner/);
+  assert.match(main, /generation !== memberReadGeneration \|\| householdId !== desiredHouseholdId/);
+  assert.match(main, /if \(!owner\) \{[\s\S]*householdPendingInvites = \[\][\s\S]*invitesReady = Promise\.resolve\(\{ ok:true \}\);[\s\S]*\} else \{[\s\S]*cloud\.loadPendingInvites\(householdId\)/);
+  assert.match(main, /const readsKnown = memberReadState\.membersKnown && \(!owner \|\| memberReadState\.invitesKnown\)/);
+  assert.match(main, /rows\.join\(''\) \|\| \(readsKnown[\s\S]*尚无成员资料/);
   for (const api of ['subscribeMembers', 'loadPendingInvites', 'setMemberActive', 'cancelInvite', 'restoreBackupCopy']) {
     assert.match(firebase, new RegExp(api));
   }
