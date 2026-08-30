@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test app/ledger.test.mjs app/migration.test.mjs app/cloud-sync.test.mjs app/items.test.mjs app/item-media.test.mjs app/items-view.test.mjs app/backup-restore.test.mjs app/wallet-features.test.mjs app/pwa.test.mjs",
+    "test": "node --test app/ledger.test.mjs app/migration.test.mjs app/cloud-sync.test.mjs app/items.test.mjs app/item-media.test.mjs app/items-view.test.mjs app/backup-restore.test.mjs app/wallet-features.test.mjs app/state-icons.test.mjs app/pwa.test.mjs",
     "test:rules": "node --test app/firestore.rules.test.mjs",
     "test:rules:emulator": "firebase emulators:exec --project demo-family-wallet-v2 --only auth,firestore \"npm run test:rules\"",
     "audit:public": "node scripts/audit-public.mjs",

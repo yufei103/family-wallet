@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "name": "morphicons",
+    "version": "1.7.1",
+    "license": "MIT",
+    "repository": "https://github.com/guillermolg00/morphicons",
+    "tarball": "https://registry.npmjs.org/morphicons/-/morphicons-1.7.1.tgz",
+    "npmIntegrity": "sha512-q5ylxy5/d7vBg0OAzanlooXf05PekovMYDuuQVpr6vAQZxl99lrJbaIi+jJ32PXQf9WEEaDO2pbNBsx1ZhEnFQ==",
+    "tarballSha256": "455276d20395d23d8fdbf387fc14eb53d6c22f98c06f311b3680cf98e0c16034"
+  },
+  "runtimeClosure": {
+    "entry": "dom.js",
+    "rawBytes": 36765,
+    "gzip9Bytes": 12861,
+    "allowedFiles": [
+      "dom.js",
+      "spring-CFHloqPP.js",
+      "normalize-CYnN3Npw.js",
+      "LICENSE",
+      "provenance.json"
+    ],
+    "files": {
+      "dom.js": {
+        "sha256": "ce2915838dbc547d9b74207d8776627f69d6ed8014f5a91fe82e30a645009655",
+        "bytes": 5113,
+        "imports": ["./spring-CFHloqPP.js", "./normalize-CYnN3Npw.js"]
+      },
+      "spring-CFHloqPP.js": {
+        "sha256": "d107c0752f72e6b6b5acb8016f3c5fa2adfebf661eb85e61562240b87dea9ae7",
+        "bytes": 18135,
+        "imports": ["./normalize-CYnN3Npw.js"]
+      },
+      "normalize-CYnN3Npw.js": {
+        "sha256": "7da2964e74cff390949302e7c771dc89eaf6daa107cd8f5356865277542cc9c3",
+        "bytes": 13517,
+        "imports": []
+      },
+      "LICENSE": {
+        "sha256": "bca713965691c297a4fc7e17eb115b373b7d08db4975c1968df7f7707267a4be",
+        "bytes": 1066
+      }
+    }
+  },
+  "localModifications": "None. Runtime JavaScript and LICENSE bytes are exact copies from the official npm tarball."
+}
