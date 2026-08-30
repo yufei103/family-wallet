@@ -87,9 +87,9 @@ test('物品卡片以不同文字标示三种状态，待付含余额，ETA 保�
     todayDate:'2026-09-10'
   });
   assert.match(html, /<small class="item-eta">预计 9月12日到货<\/small>/);
-  assert.match(html, /data-item-status="active">待付 RM 80\.00<\/em>/);
-  assert.match(html, /data-item-status="completed">已付清<\/em>/);
-  assert.match(html, /data-item-status="archived">已归档<\/em>/);
+  assert.match(html, /data-item-status="active">[\s\S]*data-state-icon="item-lifecycle" data-icon-state="idle"[\s\S]*待付 RM 80\.00<\/em>/);
+  assert.match(html, /data-item-status="completed">[\s\S]*data-icon-state="complete"[\s\S]*已付清<\/em>/);
+  assert.match(html, /data-item-status="archived">[\s\S]*data-icon-state="archive"[\s\S]*已归档<\/em>/);
   assert.doesNotMatch(html, />余额 RM/);
   assert.doesNotMatch(html, /<书桌>/);
 
@@ -98,6 +98,16 @@ test('物品卡片以不同文字标示三种状态，待付含余额，ETA 保�
   ], { formatMoney:() => 'RM <script>alert(1)</script>', todayDate:'2026-09-10' });
   assert.doesNotMatch(escapedMoney, /<script>/);
   assert.match(escapedMoney, /待付 RM &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+test('物品封面占位与状态只使用固定本地图标注册表，储存资料不能选择图标名', () => {
+  const html = renderItemCards([
+    { id:'fixed', name:'不可信图标', icon:'trash', fullPriceMinor:10000, paidMinor:0, coverMediaId:'cover-1' }
+  ], { formatMoney:value => `RM ${(value / 100).toFixed(2)}`, householdId:'home' });
+  assert.match(html, /data-state-icon="item-cover" data-icon-state="pending"/);
+  assert.match(html, /data-state-icon="item-lifecycle" data-icon-state="idle"/);
+  assert.doesNotMatch(html, /data-state-icon="trash"|data-static-icon="trash"/);
+  assert.doesNotMatch(html, />FW</);
 });
 
 test('备份递归移除照片 Data URL 与图片字段但保留业务元数据', () => {

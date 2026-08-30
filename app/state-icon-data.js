@@ -102,7 +102,10 @@ const endpointPaths = {
   'category-tax': 'M6 3h12v18l-3-2-3 2-3-2-3 2V3zM9 8h6M9 12h6M9 16h3',
   'category-fuel': 'M5 21V4h10v17M5 9h10M15 7h3l2 3v8a2 2 0 0 1-4 0v-4M8 13h4',
   'category-car': 'M5 17h14M6 17l-2-4 2-5h12l2 5-2 4M7 17v2M17 17v2M7 13h.01M17 13h.01',
-  'category-other': 'M4 4h7l9 9-7 7-9-9V4zM8 8h.01'
+  'category-other': 'M4 4h7l9 9-7 7-9-9V4zM8 8h.01',
+  'income-arrow': 'M12 20V5M6 11l6-6 6 6',
+  'expense-arrow': 'M12 4v15M6 13l6 6 6-6',
+  'transfer-arrows': 'M4 8h15M15 4l4 4-4 4M20 16H5M9 12l-4 4 4 4'
 };
 
 export const STATE_ICON_ENDPOINTS = Object.freeze({ ...endpointPaths });

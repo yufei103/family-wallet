@@ -22,6 +22,7 @@ import {
   activeFilterSummary, actorLabel, copyPreviousEntry, deleteEntryTemplate, dismissOnboarding, filterEntries,
   isOnboardingDismissed, loadEntryTemplates, onboardingState, saveEntryTemplate
 } from './wallet-features.js';
+import { resolveStateIcon, stateIconMarkup, staticIconMarkup } from './state-icon-data.js';
 
 const STORE = 'family-wallet-v2-local-demo';
 const ENTRY_PREFS_STORE = 'family-wallet-v2-entry-preferences';
@@ -39,8 +40,23 @@ const seed = () => createLedger({ accounts: [
 ], transactions: [], appliedOperationIds: [] });
 
 const viewTitles = { overview:'概览', entries:'账目', accounts:'账户', items:'物品' };
-const walletIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg>';
-const chevronIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 6l6 6l-6 6"/></svg>';
+const viewIconFamilies = { overview:'nav-home', accounts:'nav-accounts', entries:'nav-entries', items:'nav-items' };
+const transactionIconEndpoints = Object.freeze({
+  income:'income-arrow', expense:'expense-arrow', transfer:'transfer-arrows', repayment:'payment-arrow', item:'package-check'
+});
+const dialogInvokers = new WeakMap();
+
+function setStateIcon(root, state) {
+  const icon = root?.matches?.('[data-state-icon]') ? root : root?.querySelector?.('[data-state-icon]');
+  if (!icon) return;
+  const target = resolveStateIcon(icon.dataset.stateIcon, state);
+  if (!target.valid || icon.dataset.iconState === target.state) return;
+  icon.dataset.iconState = target.state;
+}
+
+function transactionIconMarkup(state) {
+  return staticIconMarkup(transactionIconEndpoints[state] ?? 'neutral');
+}
 
 const hydratedLocal = hydrate();
 let ledger = hydratedLocal.ledger;
@@ -137,7 +153,10 @@ function applyTheme(theme, { persist = true } = {}) {
   const selected = THEMES.has(theme) ? theme : 'teal';
   document.documentElement.dataset.theme = selected;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#f3f7f6');
-  document.querySelectorAll('input[name="appTheme"]').forEach(input => { input.checked = input.value === selected; });
+  document.querySelectorAll('input[name="appTheme"]').forEach(input => {
+    input.checked = input.value === selected;
+    setStateIcon(input.closest('label'), input.checked ? 'selected' : 'idle');
+  });
   if (persist) localStorage.setItem(THEME_STORE, selected);
   return selected;
 }
@@ -165,9 +184,12 @@ function showAuth(message) {
 
 function setSyncState(message, bad = false, state = '') {
   const badge = $('#syncBadge');
-  badge.textContent = message;
+  const label = badge.querySelector('[data-sync-label]');
+  if (label) label.textContent = message;
+  else badge.textContent = message;
   badge.classList.toggle('bad', bad);
   badge.dataset.state = state;
+  setStateIcon(badge, ['loading', 'cached', 'pending', 'synced', 'offline', 'recovering', 'error', 'update'].includes(state) ? state : 'idle');
   const freshness = $('#desktopFreshness');
   if (freshness) freshness.textContent = `资料状态：${message}`;
 }
@@ -177,7 +199,7 @@ function renderSyncStatus(state = syncCoordinator.getState()) {
   const status = state.status === 'offline' ? 'offline' : itemListenerError ? 'error' : state.status;
   const labels = {
     loading:'载入中', cached:'已缓存', pending:state.pendingCount ? `${state.pendingCount} 项待同步` : '待同步',
-    synced:'已同步 ↻', offline:state.pendingCount ? `离线 · ${state.pendingCount} 项排队` : '离线',
+    synced:'已同步', offline:state.pendingCount ? `离线 · ${state.pendingCount} 项排队` : '离线',
     recovering:'恢复中', error:'同步错误 · 重试'
   };
   setSyncState(labels[status] ?? '准备中', status === 'error', status);
@@ -238,6 +260,8 @@ function dialogMotionPanel(dialog) {
 
 function showDialog(dialog, afterOpen) {
   if (!dialog || dialog.open) return;
+  const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  if (invoker && !dialog.contains(invoker)) dialogInvokers.set(dialog, invoker);
   dialog.classList.remove('is-open', 'is-closing');
   dialog.classList.add('is-preparing');
   dialog.showModal();
@@ -266,7 +290,15 @@ function dismissDialog(dialog, afterClose) {
     panel?.removeEventListener('transitionend', onTransitionEnd);
     dialog.classList.remove('is-preparing', 'is-open', 'is-closing');
     if (dialog.open) dialog.close();
-    afterClose?.();
+    if (afterClose) {
+      dialogInvokers.delete(dialog);
+      afterClose();
+    }
+    else {
+      const invoker = dialogInvokers.get(dialog);
+      dialogInvokers.delete(dialog);
+      if (invoker?.isConnected && !invoker.hidden && !invoker.closest('[hidden]')) invoker.focus({ preventScroll:true });
+    }
   };
   const onTransitionEnd = event => {
     if (event.target !== panel || !['opacity', 'transform'].includes(event.propertyName)) return;
@@ -348,7 +380,7 @@ function accountSubtypeLabel(account) {
 function accountAvatarMarkup(account) {
   return account?.photoDataUrl
     ? `<img src="${escapeHtml(account.photoDataUrl)}" alt="">`
-    : walletIcon;
+    : stateIconMarkup('account', accountSubtype(account) === 'credit_card' ? 'credit' : accountSubtype(account) === 'loan' ? 'loan' : 'idle');
 }
 
 function accountFlowLabel(entry) {
@@ -421,7 +453,7 @@ function currentScope() {
 }
 function visibleActor(uidValue) { return actorLabel(uidValue, currentActorUid(), householdMembers); }
 
-function setView(view, scroll = true) {
+function setView(view, scroll = true, animate = false) {
   if (!viewTitles[view]) return;
   activeView = view;
   document.querySelectorAll('[data-view]').forEach(section => { section.hidden = section.dataset.view !== view; });
@@ -430,16 +462,19 @@ function setView(view, scroll = true) {
     button.classList.toggle('active', current);
     if (current) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
+    setStateIcon(button, current ? 'active' : 'idle');
   });
   $('#viewTitle').textContent = viewTitles[view];
   const contextAction = $('#desktopContextAction');
   if (contextAction) contextAction.textContent = view === 'accounts' ? '新增账户' : view === 'items' ? '新增物品' : '新增账目';
   const activeSection = document.querySelector(`[data-view="${view}"]`);
   document.querySelectorAll('[data-view-transition]').forEach(section => section.removeAttribute('data-view-transition'));
-  activeSection?.setAttribute('data-view-transition', 'entering');
+  if (animate && !prefersReducedMotion()) activeSection?.setAttribute('data-view-transition', 'entering');
   clearTimeout(viewTransitionTimer);
-  viewTransitionTimer = setTimeout(() => activeSection?.removeAttribute('data-view-transition'), 220);
-  if (scroll) window.scrollTo({ top:0, behavior:'smooth' });
+  viewTransitionTimer = animate && !prefersReducedMotion()
+    ? setTimeout(() => activeSection?.removeAttribute('data-view-transition'), 220)
+    : null;
+  if (scroll) window.scrollTo({ top:0, behavior:prefersReducedMotion() ? 'auto' : 'smooth' });
 }
 
 function currentMediaHouseholdId() {
@@ -571,13 +606,13 @@ function paymentTimelineMarkup(payments) {
       const linked = payment.mode === 'linked';
       const label = payment.type === 'deposit' ? '订金' : '付款';
       const receipt = payment.receiptMediaId
-        ? `<button class="minor-button" type="button" data-view-receipt="${escapeHtml(payment.id)}">查看凭证</button>` : '';
+        ? `<button class="minor-button icon-label-button" type="button" data-view-receipt="${escapeHtml(payment.id)}">${stateIconMarkup('receipt', 'idle')}<span>查看凭证</span></button>` : '';
       const correction = voided
-        ? `<button class="minor-button" data-restore-payment="${escapeHtml(payment.id)}" type="button">恢复付款</button>`
-        : `<button class="minor-button delete" data-void-payment="${escapeHtml(payment.id)}" type="button">作废付款</button>`;
-      const menu = `<details class="payment-menu"><summary class="minor-button" aria-label="付款更正菜单">⋯</summary><div class="payment-menu-popover">${correction}</div></details>`;
+        ? `<button class="minor-button icon-label-button" data-restore-payment="${escapeHtml(payment.id)}" type="button">${stateIconMarkup('correction', 'restore')}<span>恢复付款</span></button>`
+        : `<button class="minor-button delete icon-label-button" data-void-payment="${escapeHtml(payment.id)}" type="button">${stateIconMarkup('correction', 'void')}<span>作废付款</span></button>`;
+      const menu = `<details class="payment-menu"><summary class="minor-button" aria-label="付款更正菜单">${stateIconMarkup('menu', 'closed')}</summary><div class="payment-menu-popover">${correction}</div></details>`;
       const actor = visibleActor(payment.actorUid ?? payment.createdBy ?? payment.updatedByUid);
-      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div><b>${label} · ${formatRM(payment.amountMinor)}</b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)} · ${escapeHtml(actor)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${menu}</div></div>`;
+      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div class="payment-row-main"><b>${stateIconMarkup('correction', voided ? 'void' : 'active')}<span>${label} · ${formatRM(payment.amountMinor)}</span></b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)} · ${escapeHtml(actor)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${menu}</div></div>`;
     }).join('');
 }
 
@@ -588,7 +623,9 @@ function renderItemDetail() {
     return;
   }
   $('#itemDetailName').textContent = item.name;
-  $('#itemDetailState').textContent = item.status === 'archived' ? '已归档' : item.status === 'completed' ? '已付清' : '收藏中';
+  const itemState = $('#itemDetailState');
+  itemState.querySelector('b').textContent = item.status === 'archived' ? '已归档' : item.status === 'completed' ? '已付清' : '收藏中';
+  setStateIcon(itemState, item.status === 'archived' ? 'archive' : item.status === 'completed' ? 'complete' : 'idle');
   $('#itemDetailBalance').textContent = formatRM(item.balanceMinor);
   $('#itemDetailPaid').textContent = `已付 ${formatRM(item.paidMinor)} / ${formatRM(item.fullPriceMinor)}`;
   $('#itemDetailProgress').style.width = `${item.progress}%`;
@@ -610,7 +647,8 @@ function renderItemDetail() {
   const cover = item.coverMediaId ? mediaCache.get(mediaKey(householdId, item.coverMediaId)) : null;
   $('#itemDetailCover').innerHTML = cover?.dataUrl
     ? `<img src="${escapeHtml(cover.dataUrl)}" alt="${escapeHtml(item.name)} 封面">`
-    : '<div class="item-cover-placeholder"><span aria-hidden="true">FW</span><small>暂无封面</small></div>';
+    : `<div class="item-cover-placeholder"><span class="item-cover-placeholder-icon">${stateIconMarkup('item-cover', 'idle')}</span><small>暂无封面</small></div>`;
+  $('#itemPaymentTimeline').querySelectorAll('.payment-menu').forEach(menu => menu.addEventListener('toggle', () => setStateIcon(menu, menu.open ? 'open' : 'closed')));
   $('#itemPaymentTimeline').querySelectorAll('[data-view-receipt]').forEach(button => {
     button.addEventListener('click', () => showReceipt(currentItemPayments.find(payment => payment.id === button.dataset.viewReceipt), button));
   });
@@ -623,7 +661,7 @@ function renderItemDetail() {
   if (requestedPaymentId) {
     const paymentId = requestedPaymentId;
     requestedPaymentId = null;
-    setTimeout(() => $('#itemPaymentTimeline').querySelector(`[data-payment-id="${CSS.escape(paymentId)}"]`)?.scrollIntoView({ behavior:'smooth', block:'center' }), 40);
+    setTimeout(() => $('#itemPaymentTimeline').querySelector(`[data-payment-id="${CSS.escape(paymentId)}"]`)?.scrollIntoView({ behavior:prefersReducedMotion() ? 'auto' : 'smooth', block:'center' }), 40);
   }
 }
 
@@ -1086,11 +1124,11 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
       const amountClass = targetContext ? '' : 'expense';
       const amountText = targetContext ? `−欠款 ${formatRM(shownMinor)}` : `−${formatRM(shownMinor)}`;
       const desktopFlow = `${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'}${entry.note ? ` · ${entry.note}` : ''}`;
-      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">还</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>还款</b><small>${escapeHtml(target?.name ?? '负债账户')}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amountText}</span></button>`;
+      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">${stateIconMarkup('transaction', 'repayment')}</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>还款</b><small>${escapeHtml(target?.name ?? '负债账户')}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amountText}</span></button>`;
     }
     const isLinkedItemPayment = entry.sourceType === 'itemPayment';
     const linkedItem = isLinkedItemPayment ? itemById(entry.sourceItemId) : null;
-    const sign = entry.kind === 'expense' ? '−' : entry.kind === 'income' ? '＋' : '↔';
+
     let amountClass = entry.kind === 'expense' ? 'expense' : '';
     let amount = entry.kind === 'transfer' ? '转账' : `${entry.kind === 'expense' ? '−' : '＋'}${formatRM(entry.amountMinor)}`;
     if (entry.kind === 'transfer' && contextAccountId) {
@@ -1103,7 +1141,7 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
     const route = isLinkedItemPayment ? ` data-linked-item-id="${escapeHtml(entry.sourceItemId)}" data-linked-payment-id="${escapeHtml(entry.sourcePaymentId)}"` : '';
     const aria = isLinkedItemPayment ? `查看物品付款 ${linkedItem?.name ?? ''}` : `编辑 ${typeLabel(entry.kind)} ${formatRM(entry.amountMinor)}`;
     const desktopFlow = `${accountFlowLabel(entry)} · ${entry.note || linkedItem?.name || '无备注'}`;
-    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${sign}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>${escapeHtml(title)}</b><small>${escapeHtml(typeLabel(entry.kind))}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amount}</span></button>`;
+    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${stateIconMarkup('transaction', isLinkedItemPayment ? 'item' : entry.kind)}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>${escapeHtml(title)}</b><small>${escapeHtml(typeLabel(entry.kind))}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amount}</span></button>`;
   }).join('');
 }
 
@@ -1188,14 +1226,14 @@ function renderUpcomingActions() {
     const subtype = accountSubtype(account);
     if (subtype === 'credit_card' && account.balanceMinor > 0 && account.dueDay) {
       const dueDate = nextMonthlyDate(account.dueDay);
-      actions.push({ type:'account', id:account.id, sortDate:dueDate, icon:'卡', iconClass:'repayment', title:`${account.name} 还款日`, detail:`当前欠款 ${formatRM(account.balanceMinor)}`, value:describeEtaDate(dueDate, today()).replace(/^预计/, '') });
+      actions.push({ type:'account', id:account.id, sortDate:dueDate, iconFamily:'credit', iconState:'idle', iconClass:'repayment', title:`${account.name} 还款日`, detail:`当前欠款 ${formatRM(account.balanceMinor)}`, value:describeEtaDate(dueDate, today()).replace(/^预计/, '') });
     } else if (subtype === 'loan' && account.balanceMinor > 0 && account.scheduledPaymentMinor) {
-      actions.push({ type:'account', id:account.id, sortDate:account.expectedPayoffDate || '9999-12-31', icon:'贷', iconClass:'repayment', title:`${account.name} 每期还款`, detail:`剩余本金 ${formatRM(account.balanceMinor)}`, value:formatRM(account.scheduledPaymentMinor), meta:account.expectedPayoffDate ? `预计 ${account.expectedPayoffDate} 还清` : '按计划还款' });
+      actions.push({ type:'account', id:account.id, sortDate:account.expectedPayoffDate || '9999-12-31', iconFamily:'loan', iconState:'scheduled', iconClass:'repayment', title:`${account.name} 每期还款`, detail:`剩余本金 ${formatRM(account.balanceMinor)}`, value:formatRM(account.scheduledPaymentMinor), meta:account.expectedPayoffDate ? `预计 ${account.expectedPayoffDate} 还清` : '按计划还款' });
     }
   }
   for (const item of itemRecords) {
     if (item.deletedAt || !item.etaDate || item.archivedAt || item.status === 'archived') continue;
-    actions.push({ type:'item', id:item.id, sortDate:item.etaDate, icon:'物', iconClass:'eta', title:`${item.name} 预计到货`, detail:item.balanceMinor > 0 ? `待付 ${formatRM(item.balanceMinor)}` : '已付清', value:describeEtaDate(item.etaDate, today()) });
+    actions.push({ type:'item', id:item.id, sortDate:item.etaDate, iconFamily:'package', iconState:item.balanceMinor > 0 ? 'pending' : 'complete', iconClass:'eta', title:`${item.name} 预计到货`, detail:item.balanceMinor > 0 ? `待付 ${formatRM(item.balanceMinor)}` : '已付清', value:describeEtaDate(item.etaDate, today()) });
   }
   actions.sort((a, b) => a.sortDate.localeCompare(b.sortDate) || a.title.localeCompare(b.title, 'zh-CN'));
   const visible = actions.slice(0, 5);
@@ -1204,7 +1242,7 @@ function renderUpcomingActions() {
     list.innerHTML = '<div class="empty-state upcoming-empty-state"><b>近期没有待处理事项</b><p>信用卡还款、贷款计划和物品预计到货会显示在这里。</p></div>';
     return;
   }
-  list.innerHTML = visible.map(action => `<button class="upcoming-action-row" type="button" data-upcoming-type="${action.type}" data-upcoming-id="${escapeHtml(action.id)}"><span class="upcoming-action-icon ${action.iconClass}" aria-hidden="true">${action.icon}</span><span class="upcoming-action-main"><b>${escapeHtml(action.title)}</b><small>${escapeHtml(action.detail)}</small></span><span class="upcoming-action-value">${escapeHtml(action.value)}${action.meta ? `<small>${escapeHtml(action.meta)}</small>` : ''}</span></button>`).join('');
+  list.innerHTML = visible.map(action => `<button class="upcoming-action-row" type="button" data-upcoming-type="${action.type}" data-upcoming-id="${escapeHtml(action.id)}"><span class="upcoming-action-icon ${action.iconClass}">${stateIconMarkup(action.iconFamily, action.iconState)}</span><span class="upcoming-action-main"><b>${escapeHtml(action.title)}</b><small>${escapeHtml(action.detail)}</small></span><span class="upcoming-action-value">${escapeHtml(action.value)}${action.meta ? `<small>${escapeHtml(action.meta)}</small>` : ''}</span></button>`).join('');
   list.querySelectorAll('[data-upcoming-type]').forEach(button => button.addEventListener('click', () => {
     if (button.dataset.upcomingType === 'item') openItemDetail(button.dataset.upcomingId);
     else openAccountDetail(button.dataset.upcomingId);
@@ -1235,7 +1273,8 @@ function accountRowMarkup(account) {
     ? '<span class="account-total-status">计入家庭净额</span>'
     : '<span class="account-total-status excluded">不计入总额</span>';
   const type = subtype === 'loan' ? loanTypeLabel(account) : accountSubtypeLabel(account);
-  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${escapeHtml(type)} ${totalStatus}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="row-chevron">${chevronIcon}</span><span class="desktop-account-cell desktop-account-name desktop-only"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><b>${escapeHtml(account.name)}</b></span><span class="desktop-account-cell desktop-account-type desktop-only">${escapeHtml(type)}</span><span class="desktop-account-cell desktop-account-balance desktop-only"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="desktop-account-cell desktop-account-included desktop-only">${totalStatus}</span><span class="desktop-account-cell desktop-account-open desktop-only">${chevronIcon}</span></button>`;
+  const chevron = staticIconMarkup('chevron-right');
+  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${escapeHtml(type)} ${totalStatus}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="row-chevron">${chevron}</span><span class="desktop-account-cell desktop-account-name desktop-only"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><b>${escapeHtml(account.name)}</b></span><span class="desktop-account-cell desktop-account-type desktop-only">${escapeHtml(type)}</span><span class="desktop-account-cell desktop-account-balance desktop-only"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="desktop-account-cell desktop-account-included desktop-only">${totalStatus}</span><span class="desktop-account-cell desktop-account-open desktop-only">${chevron}</span></button>`;
 }
 
 function renderAccountGroups(accounts) {
@@ -1465,6 +1504,7 @@ function renderEntryResults() {
   const entries = filteredEntries();
   $('#entryFilterSummary').textContent = activeFilterSummary(entryFilters, accountById(entryFilters.accountId)?.name || '', entries.length);
   $('#clearEntryFilters').hidden = !hasActiveEntryFilters();
+  setStateIcon($('#openEntryFilters'), hasActiveEntryFilters() ? 'active' : 'idle');
   $('#entrySearchInput').value = entryFilters.keyword;
   $('#allMonthsToggle').checked = entryFilters.allMonths;
   $('#transactionList').innerHTML = renderTransactionRows(entries,
@@ -1492,8 +1532,8 @@ function renderOnboarding() {
   if (hidden) return;
   const next = state.steps.find(step => !step.complete);
   $('#gettingStartedList').innerHTML = `<div class="getting-started-steps">${state.steps.map(step =>
-    `<span class="getting-started-step ${step.complete ? 'complete' : ''}"><i aria-hidden="true">${step.complete ? '✓' : '○'}</i>${escapeHtml(step.label)}</span>`
-  ).join('')}</div>${next ? `<button class="primary-button compact-onboarding-cta" type="button" data-onboarding-action="${next.action}">${escapeHtml(next.label)}</button>` : ''}`;
+    `<span class="getting-started-step ${step.complete ? 'complete' : ''}"><i>${stateIconMarkup('onboarding', step.complete ? 'complete' : 'incomplete')}</i>${escapeHtml(step.label)}</span>`
+  ).join('')}</div>${next ? `<button class="primary-button compact-onboarding-cta icon-label-button" type="button" data-onboarding-action="${next.action}">${stateIconMarkup('onboarding', next.action === 'account' ? 'wallet' : next.action === 'entry' ? 'entry' : 'member')}<span>${escapeHtml(next.label)}</span></button>` : ''}`;
   panel.querySelector('[data-onboarding-action]')?.addEventListener('click', event => {
     const action = event.currentTarget.dataset.onboardingAction;
     if (action === 'account') openAccount();
@@ -1511,7 +1551,7 @@ function memberDisplayMarkup(member) {
 function renderMembers() {
   const list = $('#memberList');
   if (!usesCloudStore()) {
-    list.innerHTML = '<div class="member-row"><span class="member-main"><b>你</b><small>本机账本</small></span><span class="member-status">本机</span></div>';
+    list.innerHTML = `<div class="member-row"><span class="member-main"><b>你</b><small>本机账本</small></span><span class="member-status">${stateIconMarkup('member', 'active')}<span>本机</span></span></div>`;
     $('#refreshMembersButton').hidden = true;
     return;
   }
@@ -1527,11 +1567,11 @@ function renderMembers() {
     const manageable = owner && member.role === 'member' && member.uid !== cloudUser?.uid;
     const action = manageable
       ? `<button class="minor-button member-action" type="button" data-member-id="${escapeHtml(member.uid)}" data-member-active="${member.active === false}">${member.active === false ? '启用' : '停用'}</button>` : '';
-    return `<div class="member-row" data-member-status="${status}">${memberDisplayMarkup(member)}<span class="member-status">${label}</span>${action}</div>`;
+    return `<div class="member-row" data-member-status="${status}">${memberDisplayMarkup(member)}<span class="member-status">${stateIconMarkup('member', status)}<span>${label}</span></span>${action}</div>`;
   });
   for (const invite of householdPendingInvites) {
     const action = owner ? `<button class="minor-button member-action delete" type="button" data-cancel-invite="${escapeHtml(invite.email)}">取消邀请</button>` : '';
-    rows.push(`<div class="member-row" data-member-status="pending"><span class="member-main"><b>${escapeHtml(invite.email)}</b><small>等待对方接受</small></span><span class="member-status">待加入</span>${action}</div>`);
+    rows.push(`<div class="member-row" data-member-status="pending"><span class="member-main"><b>${escapeHtml(invite.email)}</b><small>等待对方接受</small></span><span class="member-status">${stateIconMarkup('member', 'pending')}<span>待加入</span></span>${action}</div>`);
   }
   list.innerHTML = rows.join('') || '<div class="empty-state"><b>尚无成员资料</b><p>重新载入后仍为空，请检查网络连接。</p></div>';
   list.querySelectorAll('[data-member-id]').forEach(button => button.addEventListener('click', async () => {
@@ -1617,7 +1657,8 @@ function render() {
   $('#monthPicker').value = selectedMonth;
 
   const status = $('#reconcileStatus');
-  status.textContent = check.ok ? '余额已核对' : `发现 ${check.mismatches.length} 项差异`;
+  status.querySelector('span').textContent = check.ok ? '余额已核对' : `发现 ${check.mismatches.length} 项差异`;
+  setStateIcon(status, check.ok ? 'balanced' : 'mismatch');
   status.classList.toggle('bad', !check.ok);
 
   const accounts = activeAccounts();
@@ -1678,7 +1719,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
   const optionMarkup = (account, selectedId) => {
     const details = accountOptionDetails(account);
     const selected = account.id === selectedId;
-    return `<button class="account-picker-option" type="button" role="option" aria-selected="${selected}" tabindex="${selected ? '0' : '-1'}" data-account-picker-id="${escapeHtml(account.id)}"><span class="account-picker-name">${escapeHtml(account.name)}</span><span class="account-picker-type">${escapeHtml(details.type)}</span><span class="account-picker-amount">${escapeHtml(details.balance)}</span><span class="account-picker-check" aria-hidden="true">${selected ? '✓' : ''}</span></button>`;
+    return `<button class="account-picker-option" type="button" role="option" aria-selected="${selected}" tabindex="${selected ? '0' : '-1'}" data-account-picker-id="${escapeHtml(account.id)}"><span class="account-picker-name">${escapeHtml(account.name)}</span><span class="account-picker-type">${escapeHtml(details.type)}</span><span class="account-picker-amount">${escapeHtml(details.balance)}</span><span class="account-picker-check">${stateIconMarkup('completion', selected ? 'complete' : 'incomplete')}</span></button>`;
   };
 
   const renderOptions = () => {
@@ -1696,6 +1737,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     control.type.textContent = details.type;
     control.amount.textContent = details.balance;
     control.trigger.disabled = control.select.disabled || !selected;
+    setStateIcon(control.trigger, activeKey === key ? 'up' : 'down');
     if (activeKey === key) renderOptions();
   };
 
@@ -1713,6 +1755,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     const finishClose = () => {
       resetDrag();
       control?.trigger.setAttribute('aria-expanded', 'false');
+      setStateIcon(control?.trigger, 'down');
       activeKey = null;
       if (returnFocus) control?.trigger.focus();
     };
@@ -1736,6 +1779,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     sync(key);
     title.textContent = control.title;
     control.trigger.setAttribute('aria-expanded', 'true');
+    setStateIcon(control.trigger, 'up');
     showDialog(dialog, () => {
       const optionButtons = [...list.querySelectorAll('[role="option"]')];
       const selectedIndex = optionButtons.findIndex(option => option.getAttribute('aria-selected') === 'true');
@@ -1761,7 +1805,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     control.select.value = accountId;
     sync(activeKey);
     control.select.dispatchEvent(new Event('change', { bubbles:true }));
-    close();
+    close(true);
   };
 
   for (const control of Object.values(controls)) {
@@ -1879,6 +1923,7 @@ function selectCategory(value = '', focusCustom = false) {
     const selected = button.dataset.category === selectedCategory;
     button.classList.toggle('selected', selected);
     button.setAttribute('aria-checked', String(selected));
+    setStateIcon(button, selected ? 'selected' : 'idle');
   });
   const customField = $('#customCategoryField');
   customField.hidden = selectedCategory !== '其它';
@@ -1937,7 +1982,7 @@ function renderEntryTemplates() {
   const scope = currentScope();
   const templates = loadEntryTemplates(localStorage, scope.userId, scope.householdId, kind);
   list.innerHTML = templates.length ? templates.map(template =>
-    `<div class="entry-template-row"><button class="entry-template-apply" type="button" data-template-id="${escapeHtml(template.id)}"><b>${escapeHtml(template.name)}</b><small>${escapeHtml(typeLabel(template.kind))} · ${formatRM(template.amountMinor)}</small></button><button class="entry-template-delete" type="button" data-delete-template="${escapeHtml(template.id)}" aria-label="删除 ${escapeHtml(template.name)}">×</button></div>`
+    `<div class="entry-template-row"><button class="entry-template-apply" type="button" data-template-id="${escapeHtml(template.id)}">${stateIconMarkup('template', 'copy')}<span><b>${escapeHtml(template.name)}</b><small>${escapeHtml(typeLabel(template.kind))} · ${formatRM(template.amountMinor)}</small></span></button><button class="entry-template-delete" type="button" data-delete-template="${escapeHtml(template.id)}" aria-label="删除 ${escapeHtml(template.name)}">${staticIconMarkup('trash')}</button></div>`
   ).join('') : `<p class="entry-template-empty">还没有${escapeHtml(kindLabel)}常用模板。可先填写表单，再存为常用。</p>`;
   list.querySelectorAll('[data-template-id]').forEach(button => button.addEventListener('click', () => {
     const template = templates.find(candidate => candidate.id === button.dataset.templateId);
@@ -2023,7 +2068,7 @@ function renderAccountPhotoPreview() {
   const preview = $('#accountPhotoPreview');
   preview.innerHTML = pendingAccountPhotoDataUrl
     ? `<img src="${escapeHtml(pendingAccountPhotoDataUrl)}" alt="账户照片预览">`
-    : walletIcon;
+    : stateIconMarkup('account', document.querySelector('input[name="accountSubtype"]:checked')?.value === 'credit_card' ? 'credit' : document.querySelector('input[name="accountSubtype"]:checked')?.value === 'loan' ? 'loan' : 'idle');
   preview.classList.toggle('has-photo', Boolean(pendingAccountPhotoDataUrl));
   $('#removeAccountPhotoButton').hidden = !pendingAccountPhotoDataUrl;
 }
@@ -2113,6 +2158,7 @@ function updateAccountSubtypeFields() {
   $('#loanFields').hidden = subtype !== 'loan';
   $('#openingBalanceLabel').textContent = subtype === 'asset' ? '当前余额（RM）' : subtype === 'loan' && $('#loanCalculationMode').value === 'fixed_instalment' ? '目前剩余应付总额（RM）' : '当前欠款（RM）';
   if (subtype === 'loan') updateLoanFields();
+  if (!pendingAccountPhotoDataUrl) renderAccountPhotoPreview();
 }
 
 function openAccount(id = null) {
@@ -2191,8 +2237,8 @@ function renderRecycle() {
   const deletedEntries = ledger.transactions
     .filter(entry => entry.deletedAt && entry.sourceType !== 'itemPayment')
     .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
-  const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">物</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · ${escapeHtml(visibleActor(item.deletedByUid ?? item.deletedBy))} · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button" data-restore-deleted-item="${escapeHtml(item.id)}">恢复物品</button></div></div></div>`).join('');
-  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">−</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(visibleActor(entry.actorUid))} · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button" data-restore="${escapeHtml(entry.id)}">恢复</button><button class="minor-button delete" data-delete="${escapeHtml(entry.id)}">永久删除</button></div></div></div>`).join('');
+  const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">${stateIconMarkup('recycle', 'idle')}</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · ${escapeHtml(visibleActor(item.deletedByUid ?? item.deletedBy))} · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button icon-label-button" data-restore-deleted-item="${escapeHtml(item.id)}">${stateIconMarkup('recycle', 'restore')}<span>恢复物品</span></button></div></div></div>`).join('');
+  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">${stateIconMarkup('transaction', entry.kind === 'repayment' ? 'repayment' : entry.kind)}</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(visibleActor(entry.actorUid))} · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button icon-label-button" data-restore="${escapeHtml(entry.id)}">${stateIconMarkup('recycle', 'restore')}<span>恢复</span></button><button class="minor-button delete icon-label-button" data-delete="${escapeHtml(entry.id)}">${staticIconMarkup('trash')}<span>永久删除</span></button></div></div></div>`).join('');
   $('#recycleList').innerHTML = itemMarkup || entryMarkup
     ? `${itemMarkup}${entryMarkup}`
     : '<div class="empty-state"><b>回收站是空的</b><p>移除的普通账目和物品会显示在这里。</p></div>';
@@ -2377,7 +2423,7 @@ function requestDialogClose(dialog) {
   else dismissDialog(dialog);
 }
 
-document.querySelectorAll('[data-view-target]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewTarget)));
+document.querySelectorAll('[data-view-target]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewTarget, true, true)));
 document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => requestDialogClose($(`#${button.dataset.closeDialog}`))));
 document.querySelectorAll('dialog').forEach(dialog => {
   dialog.addEventListener('click', event => {
@@ -2387,9 +2433,13 @@ document.querySelectorAll('dialog').forEach(dialog => {
     event.preventDefault();
     requestDialogClose(dialog);
   });
-  dialog.addEventListener('close', applyPendingWalletUpdate);
+  dialog.addEventListener('close', () => {
+    if (dialog.id === 'topbarActionsDialog') setStateIcon($('#moreButton'), 'closed');
+    applyPendingWalletUpdate();
+  });
 });
 $('#moreButton').addEventListener('click', () => {
+  setStateIcon($('#moreButton'), 'open');
   showDialog($('#topbarActionsDialog'));
 });
 function openSettingsDialog() {
@@ -2423,7 +2473,7 @@ $('#syncBadge').addEventListener('click', () => {
     }
     const refreshUrl = new URL(location.href);
     refreshUrl.searchParams.set('wallet-refresh', String(Date.now()));
-    $('#syncBadge').textContent = '刷新中';
+    setSyncState('刷新中', false, 'update');
     $('#syncBadge').disabled = true;
     location.replace(refreshUrl.href);
     return;
@@ -2816,7 +2866,7 @@ $('#removeAccountPhotoButton').addEventListener('click', () => {
   pendingAccountPhotoDataUrl = null;
   renderAccountPhotoPreview();
 });
-$('#viewAllEntriesButton').addEventListener('click', () => setView('entries'));
+$('#viewAllEntriesButton').addEventListener('click', () => setView('entries', true, true));
 $('#exportButton').addEventListener('click', exportLocal);
 $('#restoreFileInput').addEventListener('change', async event => {
   const file = event.target.files?.[0] ?? null;
@@ -2917,12 +2967,13 @@ $('#refreshMembersButton').addEventListener('click', () => {
 $('#monthPicker').addEventListener('change', event => {
   if (!event.target.value) return;
   selectedMonth = event.target.value;
+  setStateIcon($('#monthFilterButton'), 'selected');
   render();
 });
 $('#monthForm').addEventListener('submit', event => {
   event.preventDefault();
   dismissDialog($('#monthDialog'));
-  setView('entries');
+  setView('entries', true, true);
 });
 document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener('change', () => {
   updateKindState();

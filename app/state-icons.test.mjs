@@ -220,7 +220,7 @@ function installFakeAnimationFrame() {
 }
 
 test('registry has canonical static output and every family state resolves locally', () => {
-  assert.equal(Object.keys(STATE_ICON_ENDPOINTS).length, 101);
+  assert.equal(Object.keys(STATE_ICON_ENDPOINTS).length, 104);
   assert.equal(Object.keys(STATE_ICON_REGISTRY).length, 50);
   assert.ok(Object.isFrozen(STATE_ICON_ENDPOINTS));
   assert.ok(Object.isFrozen(STATE_ICON_REGISTRY));
