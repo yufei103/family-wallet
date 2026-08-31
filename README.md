@@ -21,6 +21,7 @@ A mobile-first household finance PWA for recording income, expenses, transfers a
 - Item payments can atomically create a linked shopping expense or stay independent from the ledger
 - Separate, on-demand compressed item covers and receipt documents; receipts open in a bounded standalone viewer and image bytes never enter realtime item/payment listeners
 - Installable Web/iPhone icon assets without the source canvas border
+- A progressive state-icon foundation with static SVG fallback, reduced-motion support and a pinned self-hosted Morphicons runtime
 - Offline PWA shell, local Firestore cache and truthful cached/pending/offline/recovering sync states
 - Recycle bin, restore, reconciliation and metadata-only JSON export from the low-frequency settings menu
 - Responsive phone and desktop layouts
@@ -110,6 +111,10 @@ npm run serve
 ```
 
 Use `?local=1` for the device-only demonstration mode. It does not connect to Firebase.
+
+### Browser runtime dependencies
+
+The state-icon subsystem is self-hosted: Morphicons 1.7.1 is pinned under `app/vendor/morphicons/1.7.1/`, included in the offline shell and documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). It does not load an icon CDN, icon font, UI framework or second icon family. The existing Firebase integration remains separate and continues to import the official Firebase browser SDK modules from `www.gstatic.com` in `app/firebase-client.js`.
 
 ## Item payment and export boundaries
 

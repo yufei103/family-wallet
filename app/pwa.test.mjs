@@ -15,7 +15,13 @@ test('PWA 声明与离线 worker 引用所有首屏模块', async () => {
   const manifestData = JSON.parse(manifest);
   assert.equal(manifestData.display, 'standalone');
   assert.deepEqual(manifestData.icons.map(icon => icon.sizes), ['192x192', '512x512', '512x512']);
-  for (const asset of ['index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js', 'items-view.js', 'cloud-sync.js', 'backup-restore.js', 'wallet-features.js', 'firebase-config.js', 'firebase-client.js']) assert.match(worker, new RegExp(asset.replace('.', '\\.')));
+  for (const asset of [
+    'index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js', 'items-view.js',
+    'cloud-sync.js', 'backup-restore.js', 'wallet-features.js', 'firebase-config.js', 'firebase-client.js',
+    'state-icon-data.js', 'state-icon-motion.js', 'vendor/morphicons/1.7.1/dom.js',
+    'vendor/morphicons/1.7.1/spring-CFHloqPP.js', 'vendor/morphicons/1.7.1/normalize-CYnN3Npw.js',
+    'vendor/morphicons/1.7.1/LICENSE', 'vendor/morphicons/1.7.1/provenance.json'
+  ]) assert.match(worker, new RegExp(asset.replaceAll('.', '\\.')));
   for (const icon of ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png']) assert.match(worker, new RegExp(icon.replace('.', '\\.')));
   assert.match(worker, /self\.skipWaiting\(\)/);
   assert.match(worker, /caches\.keys\(\).*cacheName !== CACHE/s);
@@ -43,7 +49,52 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-28/);
+  assert.match(worker, /family-wallet-v2-cloud-30/);
+});
+
+test('Morphicons PWA foundation is pinned, self-hosted, progressive and framework-free', async () => {
+  const [worker, build, data, motion, dom, spring, normalize, license, provenanceText, notices, packageText] = await Promise.all([
+    readFile(app('./service-worker.js'), 'utf8'), readFile(app('../scripts/build.mjs'), 'utf8'),
+    readFile(app('./state-icon-data.js'), 'utf8'), readFile(app('./state-icon-motion.js'), 'utf8'),
+    readFile(app('./vendor/morphicons/1.7.1/dom.js'), 'utf8'),
+    readFile(app('./vendor/morphicons/1.7.1/spring-CFHloqPP.js'), 'utf8'),
+    readFile(app('./vendor/morphicons/1.7.1/normalize-CYnN3Npw.js'), 'utf8'),
+    readFile(app('./vendor/morphicons/1.7.1/LICENSE'), 'utf8'),
+    readFile(app('./vendor/morphicons/1.7.1/provenance.json'), 'utf8'),
+    readFile(app('../THIRD_PARTY_NOTICES.md'), 'utf8'), readFile(app('../package.json'), 'utf8')
+  ]);
+  const closure = [
+    'state-icon-data.js', 'state-icon-motion.js', 'vendor/morphicons/1.7.1/dom.js',
+    'vendor/morphicons/1.7.1/spring-CFHloqPP.js', 'vendor/morphicons/1.7.1/normalize-CYnN3Npw.js',
+    'vendor/morphicons/1.7.1/LICENSE', 'vendor/morphicons/1.7.1/provenance.json'
+  ];
+  for (const asset of closure) {
+    assert.match(worker, new RegExp(asset.replaceAll('.', '\\.')));
+    assert.match(build, new RegExp(asset.split('/').at(-1).replaceAll('.', '\\.')));
+  }
+
+  const provenance = JSON.parse(provenanceText);
+  assert.equal(provenance.package.name, 'morphicons');
+  assert.equal(provenance.package.version, '1.7.1');
+  assert.equal(provenance.package.license, 'MIT');
+  assert.equal(provenance.package.tarballSha256, '455276d20395d23d8fdbf387fc14eb53d6c22f98c06f311b3680cf98e0c16034');
+  assert.deepEqual([...provenance.runtimeClosure.allowedFiles].sort(), [
+    'LICENSE', 'dom.js', 'normalize-CYnN3Npw.js', 'provenance.json', 'spring-CFHloqPP.js'
+  ]);
+  assert.match(license, /MIT License[\s\S]*Copyright \(c\) 2026 Guillermo[\s\S]*THE SOFTWARE IS PROVIDED "AS IS"/);
+  assert.match(notices, /Morphicons 1\.7\.1[\s\S]*MIT License[\s\S]*Copyright \(c\) 2026 Guillermo/);
+
+  assert.match(motion, /createMorphInstance\(path, initial\.d, \{ reducedMotion: 'user' \}\)/);
+  assert.match(data, /stateIconMarkup[\s\S]*<path data-state-icon-path d="\$\{icon\.d\}"\/>/);
+  assert.match(data, /staticIconMarkup[\s\S]*<path data-state-icon-path d="\$\{icon\.d\}"\/>/);
+  assert.doesNotMatch(data + motion, /https?:\/\/|\b(?:React|Vue|Svelte|Lucide|Tabler|Iconify|customElements)\b|font-awesome|\.woff2?\b/i);
+  assert.doesNotMatch(packageText, /"(?:react|vue|svelte|lucide|iconify|font-awesome|morphicons)"\s*:/i);
+
+  for (const source of [dom, spring, normalize]) {
+    const imports = [...source.matchAll(/\bfrom\s+["']([^"']+)["']/g)].map(match => match[1]);
+    assert.ok(imports.every(specifier => specifier.startsWith('./')), 'vendored runtime imports must stay local and relative');
+    assert.doesNotMatch(source, /\bimport\s*\(|https?:\/\/|\b(?:fetch|XMLHttpRequest|WebSocket|Worker)\b/);
+  }
 });
 
 test('Apple/iPhone 壳层保留五项导航与中央圆形新增入口', async () => {
@@ -88,7 +139,7 @@ test('顶栏更多按钮打开 action sheet，再从菜单进入邀请或设置'
   assert.match(actionsDialog, /id="inviteMemberButton"/);
   assert.match(actionsDialog, /id="openSettingsButton"/);
   assert.doesNotMatch(actionsDialog, /onclick=/);
-  assert.match(main, /\$\('#moreButton'\)\.addEventListener\('click', \(\) => \{\s*showDialog\(\$\('#topbarActionsDialog'\)\);/s);
+  assert.match(main, /\$\('#moreButton'\)\.addEventListener\('click', \(\) => \{\s*setStateIcon\(\$\('#moreButton'\), 'open'\);\s*showDialog\(\$\('#topbarActionsDialog'\)\);/s);
   assert.match(main, /\$\('#openSettingsButton'\)\.addEventListener\('click',[\s\S]*dismissDialog\(\$\('#topbarActionsDialog'\), \(\) => \{[\s\S]*showDialog\(\$\('#settingsDialog'\)\)/);
   assert.match(main, /function openInviteDialog\(\)[\s\S]*showDialog\(\$\('#inviteDialog'\)\)/);
   assert.match(main, /\$\('#inviteMemberButton'\)\.addEventListener\('click',[\s\S]*dismissDialog\(\$\('#topbarActionsDialog'\), openInviteDialog\)/);
@@ -103,7 +154,9 @@ test('Service Worker 强制更新资源、导航走网络，并把刷新交给�
   assert.match(main, /\.then\(registration => registration\.update\(\)\)/);
   assert.match(main, /navigator\.serviceWorker\.addEventListener\('message', handleWalletUpdateMessage\)/);
   assert.match(main, /document\.querySelector\('dialog\[open\]'\)/);
-  assert.match(main, /dialog\.addEventListener\('close', applyPendingWalletUpdate\)/);
+  assert.match(main, /event\.data\?\.type !== 'FAMILY_WALLET_UPDATE_READY'/);
+  assert.match(main, /if \(hasOpenWalletDialog\(\)\) \{[\s\S]*setSyncState\('更新就绪，完成当前操作后刷新', false, 'update'\)[\s\S]*setAttribute\('role', 'status'\)[\s\S]*setAttribute\('aria-live', 'polite'\)[\s\S]*return;/);
+  assert.match(main, /dialog\.addEventListener\('close', \(\) => \{[\s\S]*?applyPendingWalletUpdate\(\);\s*\}\);/);
   assert.match(main, /location\.replace\(refreshUrl\.href\)/);
   assert.match(worker, /cache\.addAll\(ASSETS\.map\(asset => new Request\(asset, \{ cache:'reload' \}\)\)\)/);
   assert.match(worker, /self\.skipWaiting\(\)/);
@@ -159,11 +212,57 @@ test('视图短暂 crossfade、118px 手机底部预留与安全区 Toast 不改
   const [main, styles] = await Promise.all([readFile(app('./main.js'), 'utf8'), readFile(app('./styles.css'), 'utf8')]);
   assert.match(main, /activeView = view;[\s\S]*data-view-target[\s\S]*aria-current[\s\S]*setAttribute\('data-view-transition', 'entering'\)/);
   assert.match(main, /setTimeout\(\(\) => activeSection\?\.removeAttribute\('data-view-transition'\), 220\)/);
-  assert.match(main, /if \(scroll\) window\.scrollTo\(\{ top:0, behavior:'smooth' \}\)/);
-  assert.match(styles, /\.app-view(?:\[data-view-transition="entering"\])?\s*\{[^}]*animation:\s*view-enter/s);
+  assert.match(main, /if \(scroll\) window\.scrollTo\(\{ top:0, behavior:prefersReducedMotion\(\) \? 'auto' : 'smooth' \}\)/);
+  assert.match(styles, /\.app-view\[data-view-transition="entering"\]\s*\{[^}]*animation:\s*view-enter var\(--motion-state\) var\(--ease-standard\) both/s);
+  assert.doesNotMatch(styles, /\.app-view\s*\{[^}]*animation:/s);
   assert.match(styles, /@keyframes view-enter\s*\{[^}]*opacity:\s*0[^}]*\}[^}]*opacity:\s*1/s);
   assert.match(styles, /\.app-shell\s*\{[^}]*padding:[^;]*calc\(118px \+ env\(safe-area-inset-bottom\)\)/s);
   assert.match(styles, /\.toast\s*\{[^}]*top:\s*auto[^}]*bottom:\s*calc\([^;]*env\(safe-area-inset-bottom\)[^;]*\+\s*82px\)/s);
+});
+
+test('Stage 2A 共用 motion、Icon、焦点、选中与 Dialog shell 契约', async () => {
+  const styles = await readFile(app('./styles.css'), 'utf8');
+  for (const [token, value] of [
+    ['motion-instant', '100ms'], ['motion-fast', '160ms'], ['motion-state', '220ms'], ['motion-layout', '280ms']
+  ]) assert.match(styles, new RegExp(`--${token}:\\s*${value}`));
+  assert.match(styles, /--ease-standard:\s*cubic-bezier\(0\.2, 0, 0, 1\)/);
+  assert.match(styles, /--ease-expo:\s*cubic-bezier\(0\.16, 1, 0\.3, 1\)/);
+  assert.match(styles, /\.app-icon\s*\{[^}]*display:\s*block[^}]*flex:\s*0 0 auto[^}]*width:\s*1\.25rem[^}]*height:\s*1\.25rem[^}]*pointer-events:\s*none/s);
+  assert.match(styles, /button:focus-visible,[^{]+\{[^}]*outline:\s*2px solid var\(--focus-ring\)[^}]*outline-offset:\s*2px/s);
+  assert.match(styles, /\.segmented span\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(styles, /\.segmented input:checked \+ span\s*\{[^}]*background:\s*var\(--selected-bg\)[^}]*color:\s*var\(--selected-ink\)[^}]*box-shadow:\s*inset/s);
+  for (const row of ['upcoming-action-row', 'transaction-row', 'account-row', 'item-card']) {
+    assert.doesNotMatch(styles, new RegExp(`\\.${row}(?::active|:hover)[^{]*\\{[^}]*transform:`));
+  }
+  assert.match(styles, /@media \(max-width: 759px\)[\s\S]*dialog\s*\{[^}]*transition-duration:\s*var\(--motion-state\)[\s\S]*dialog\.is-closing\s*\{[^}]*transition-duration:\s*var\(--motion-fast\)/s);
+  assert.match(styles, /--motion-dialog-centered-in:\s*180ms/);
+  assert.match(styles, /--motion-dialog-centered-out:\s*140ms/);
+  assert.match(styles, /#entryDialog > form,[^{]+\{[^}]*transition:\s*opacity var\(--motion-state\)[^}]*transform var\(--motion-state\)/s);
+  assert.match(styles, /#entryDialog\.is-closing > form,[^{]+\{[^}]*transition-duration:\s*var\(--motion-fast\)/s);
+  const receiptRule = styles.match(/\.receipt-viewer-shell\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(receiptRule, /transition:\s*opacity/);
+  assert.doesNotMatch(receiptRule, /transform/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.app-view\[data-view-transition="entering"\]\s*\{[^}]*animation:\s*none !important/s);
+
+  const baseBlock = styles.match(/^:root\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+  const variables = block => Object.fromEntries([...block.matchAll(/(--[\w-]+):\s*(#[\da-f]{6})\s*;/gi)].map(match => [match[1], match[2]]));
+  const base = variables(baseBlock);
+  const luminance = hex => {
+    const channels = [1, 3, 5].map(offset => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255)
+      .map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return (0.2126 * channels[0]) + (0.7152 * channels[1]) + (0.0722 * channels[2]);
+  };
+  const contrast = (foreground, background) => {
+    const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+    return (values[0] + 0.05) / (values[1] + 0.05);
+  };
+  for (const theme of ['teal', 'maybank', 'cimb', 'ocean']) {
+    const override = theme === 'teal' ? {} : variables(styles.match(new RegExp(`:root\\[data-theme="${theme}"\\]\\s*\\{([\\s\\S]*?)\\n\\}`))?.[1] ?? '');
+    const palette = { ...base, ...override };
+    for (const surface of ['--negative-soft', '--surface', '--surface-soft', '--surface-muted']) {
+      assert.ok(contrast(palette['--negative'], palette[surface]) >= 4.5, `${theme} danger text on ${surface} must meet 4.5:1`);
+    }
+  }
 });
 
 test('快速分类提供指定 Icon 标签与其它自定义输入，备注仍保持可选', async () => {
@@ -252,13 +351,15 @@ test('五个业务账户 select 共用全局原生 dialog Picker，并保留表�
   assert.doesNotMatch(main, /\$\('#(?:repaymentSourceAccount|newItemAccount|paymentAccount)'\)\.innerHTML/);
   assert.match(main, /role="option"[^>]*aria-selected=/);
   assert.equal((main.match(/select\.dispatchEvent\(new Event\('change', \{ bubbles:true \}\)\)/g) || []).length, 1);
-  assert.match(main, /control\.select\.value = accountId;[\s\S]*control\.select\.dispatchEvent\(new Event\('change', \{ bubbles:true \}\)\);\s*close\(\)/s);
+  const selectOption = main.slice(main.indexOf('const selectOption = accountId => {'), main.indexOf('for (const control of Object.values(controls))'));
+  assert.match(selectOption, /control\.select\.value = accountId;\s*sync\(activeKey\);\s*control\.select\.dispatchEvent\(new Event\('change', \{ bubbles:true \}\)\);\s*close\(true\);/s);
+  assert.match(main, /setStateIcon\(control\?\.trigger, 'down'\)/);
   assert.match(main, /control\.trigger\.disabled = control\.select\.disabled \|\| !selected/);
   assert.match(main, /form\.querySelectorAll\('input, select'\).*control\.disabled = true; \}\);\s*accountPicker\.sync\('repayment'\)/s);
   assert.match(main, /\['entryDialog', 'repaymentDialog', 'newItemDialog', 'paymentDialog'\]/);
   assert.match(main, /dialog\?\.id === 'accountPickerDialog'\) accountPicker\.close\(true\)/);
   assert.match(styles, /\.business-account-field > select\[hidden\]\s*\{[^}]*display:\s*none !important[^}]*pointer-events:\s*none !important/s);
-  assert.match(styles, /\.account-picker-trigger\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto auto[^}]*overflow:\s*hidden/s);
+  assert.match(styles, /\.account-picker-trigger\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto auto 20px[^}]*overflow:\s*hidden/s);
   assert.doesNotMatch(styles, /\.account-picker-(?:type|amount)::before[^}]*content:\s*["']｜["']/s);
   assert.match(styles, /\.account-picker-dialog\[open\]\s*\{[^}]*display:\s*grid[^}]*align-items:\s*end/s);
   assert.match(styles, /\.account-picker-options\s*\{[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto/s);
@@ -610,7 +711,9 @@ test('删除物品会成组作废付款与关联账目，并在回收站恢复�
 test('已同步状态点按会安全刷新 App，其他状态仍执行同步恢复', async () => {
   const [html, main] = await Promise.all([readFile(app('./index.html'), 'utf8'), readFile(app('./main.js'), 'utf8')]);
   assert.match(html, /id="syncBadge"[^>]*已同步时点按可刷新\s*App/);
-  assert.match(main, /synced:'已同步 ↻'/);
+  assert.match(html, /id="syncBadge"[\s\S]*data-state-icon="sync"[\s\S]*data-sync-label/);
+  assert.match(main, /synced:'已同步'/);
+  assert.doesNotMatch(main, /synced:'已同步 ↻'/);
   assert.match(main, /state\.status === 'synced' && !itemListenerError/);
   assert.match(main, /if \(hasOpenWalletDialog\(\)\)/);
   assert.match(main, /refreshUrl\.searchParams\.set\('wallet-refresh', String\(Date\.now\(\)\)\)/);
@@ -647,7 +750,7 @@ test('还款使用单一 ledger operation 与正常 transaction 同步路径', a
   assert.match(main, /interestMinor:breakdown\.interestMinor/);
   assert.match(main, /applyLedgerOperation\(ledger, \{ id:pendingRepayment\.operationId, \.\.\.changes \}\)/);
   assert.match(main, /saveTransactionRecord\(next, transactionId\)/);
-  assert.match(main, /moveToRecycleBin\(ledger, pendingRepayment\.transactionId/);
+  assert.match(main, /const transactionId = pendingRepayment\.transactionId;[\s\S]*moveToRecycleBin\(ledger, transactionId/);
   assert.match(main, /既有还款不能直接覆写，请移入回收站后重新记录/);
   assert.match(main, /saveRepaymentButton'\)\.hidden = reviewing/);
   assert.match(main, /form\.querySelectorAll\('input, select'\).*control\.disabled = true/s);
@@ -758,7 +861,12 @@ test('成熟度升级把恢复、成员、筛选、模板、引导与 actor 接�
   assert.match(main, /saveEntryTemplate\(localStorage, scope\.userId, scope\.householdId/);
   assert.match(main, /onboardingState\(\{/);
   assert.ok((main.match(/visibleActor\(/g) || []).length >= 5);
-  assert.match(main, /if \(!isCurrentOwner\(\)\) \{[\s\S]*householdPendingInvites = \[\][\s\S]*return;[\s\S]*cloud\.loadPendingInvites\(householdId\)/);
+  assert.match(main, /const generation = \+\+memberReadGeneration/);
+  assert.match(main, /membersKnown:false, invitesKnown:!owner/);
+  assert.match(main, /generation !== memberReadGeneration \|\| householdId !== desiredHouseholdId/);
+  assert.match(main, /if \(!owner\) \{[\s\S]*householdPendingInvites = \[\][\s\S]*invitesReady = Promise\.resolve\(\{ ok:true \}\);[\s\S]*\} else \{[\s\S]*cloud\.loadPendingInvites\(householdId\)/);
+  assert.match(main, /const readsKnown = memberReadState\.membersKnown && \(!owner \|\| memberReadState\.invitesKnown\)/);
+  assert.match(main, /rows\.join\(''\) \|\| \(readsKnown[\s\S]*尚无成员资料/);
   for (const api of ['subscribeMembers', 'loadPendingInvites', 'setMemberActive', 'cancelInvite', 'restoreBackupCopy']) {
     assert.match(firebase, new RegExp(api));
   }
@@ -824,7 +932,7 @@ test('Maybank 手机 Dialog 不把 Safari 26 底栏染黄，账户分组没有�
   assert.doesNotMatch(styles, /\.sheet-actions\s*\{[^}]*background:\s*linear-gradient/s);
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 28 候选和受支持 runtime', async () => {
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 30 候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -833,7 +941,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 28 候选和�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-28/);
+  assert.match(worker, /family-wallet-v2-cloud-30/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'

@@ -1,5 +1,6 @@
 import { createLedger, serialiseLedger } from './ledger.js';
 import { createItemsState, deriveItems, normaliseEtaDate, serialiseItemsState } from './items.js';
+import { stateIconMarkup } from './state-icon-data.js';
 
 export const LOCAL_SCHEMA_VERSION = 2;
 
@@ -95,7 +96,11 @@ export function displayItemsFromLocal(itemsState) {
   return deriveItems(itemsState).map(normaliseDisplayItem);
 }
 
-export function renderItemCards(items, { formatMoney, mediaCache = new Map(), householdId = 'local', todayDate = localTodayDate() } = {}) {
+export function renderItemsLoadingState(message = '正在载入物品…', tone = 'loading') {
+  return `<div class="items-loading-state" data-loading-state="${escapeHtml(tone)}" role="status"><span>${stateIconMarkup('item-cover', tone === 'error' ? 'error' : 'pending')}</span><p>${escapeHtml(message)}</p></div>`;
+}
+
+export function renderItemCards(items, { formatMoney, mediaCache = new Map(), mediaErrors = new Map(), householdId = 'local', todayDate = localTodayDate() } = {}) {
   if (!items.length) {
     return '<div class="items-empty"><b>橱窗还是空的</b><p>把想收藏、正在分期或已经拥有的物品放进来。</p><button class="secondary-button" type="button" data-new-item>新增物品</button></div>';
   }
@@ -103,9 +108,13 @@ export function renderItemCards(items, { formatMoney, mediaCache = new Map(), ho
     const item = normaliseDisplayItem(raw);
     const mediaKey = `${householdId}/${item.coverMediaId ?? ''}`;
     const cover = item.coverMediaId ? mediaCache.get(mediaKey) : null;
-    const coverMarkup = cover?.dataUrl
-      ? `<img src="${escapeHtml(cover.dataUrl)}" alt="" loading="lazy">`
-      : `<div class="item-cover-placeholder" ${item.coverMediaId ? `data-cover-media-id="${escapeHtml(item.coverMediaId)}"` : ''}><span aria-hidden="true">FW</span><small>${item.coverMediaId ? '载入封面' : '暂无封面'}</small></div>`;
+    const coverError = item.coverMediaId ? mediaErrors.get(mediaKey) : null;
+    const coverMarkup = cover?.dataUrl && !coverError
+      ? `<img src="${escapeHtml(cover.dataUrl)}" alt="" loading="lazy" data-cover-image-id="${escapeHtml(item.coverMediaId)}">`
+      : `<div class="item-cover-placeholder" ${item.coverMediaId ? `data-cover-media-id="${escapeHtml(item.coverMediaId)}"` : ''}><span class="item-cover-placeholder-icon">${stateIconMarkup('item-cover', item.coverMediaId ? 'pending' : 'idle')}</span><small>${item.coverMediaId ? '载入封面' : '暂无封面'}</small></div>`;
+    const retryMarkup = coverError
+      ? `<button class="item-cover-retry" type="button" data-retry-cover="${escapeHtml(item.coverMediaId)}" data-retry-item="${escapeHtml(item.id)}">${stateIconMarkup('receipt', 'retry')}<span>重试封面</span></button>`
+      : '';
     const paid = formatMoney(item.paidMinor);
     const full = formatMoney(item.fullPriceMinor);
     const balance = formatMoney(item.balanceMinor);
@@ -113,7 +122,8 @@ export function renderItemCards(items, { formatMoney, mediaCache = new Map(), ho
     const statusText = item.status === 'completed' ? '已付清' : item.status === 'archived' ? '已归档' : `待付 ${balance}`;
     const etaMarkup = etaDescription ? `<small class="item-eta">${escapeHtml(etaDescription)}</small>` : '';
     const accessibleLabel = `查看 ${item.name}，${statusText}${etaDescription ? `，${etaDescription}` : ''}`;
-    return `<button class="item-card" type="button" data-item-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(accessibleLabel)}"><span class="item-cover">${coverMarkup}</span><span class="item-card-copy"><b>${escapeHtml(item.name)}</b><small>已付 ${escapeHtml(paid)} / ${escapeHtml(full)}</small>${etaMarkup}<span class="item-progress" aria-label="已完成 ${item.progress}%"><i style="width:${item.progress}%"></i></span><span class="item-card-foot"><em class="item-status ${item.status}" data-item-status="${item.status}">${escapeHtml(statusText)}</em></span></span></button>`;
+    const statusIcon = stateIconMarkup('item-lifecycle', item.status === 'completed' ? 'complete' : item.status === 'archived' ? 'archive' : 'idle');
+    return `<article class="item-card"><button class="item-card-open" type="button" data-item-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(accessibleLabel)}"><span class="item-cover">${coverMarkup}</span><span class="item-card-copy"><b>${escapeHtml(item.name)}</b><small>已付 ${escapeHtml(paid)} / ${escapeHtml(full)}</small>${etaMarkup}<span class="item-progress" aria-label="已完成 ${item.progress}%"><i style="width:${item.progress}%"></i></span><span class="item-card-foot"><em class="item-status ${item.status}" data-item-status="${item.status}">${statusIcon}${escapeHtml(statusText)}</em></span></span></button>${retryMarkup}</article>`;
   }).join('');
 }
 

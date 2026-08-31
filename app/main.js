@@ -13,7 +13,7 @@ import { compressItemMedia, normaliseCoverEditState } from './item-media.js';
 import { createSyncCoordinator } from './cloud-sync.js';
 import {
   describeEtaDate, displayItemsFromLocal, hydrateLocalEnvelope, mergePendingLedgerPatch, normaliseDisplayItem,
-  rawSnapshotHasOperation, renderItemCards, serialiseLocalEnvelope
+  rawSnapshotHasOperation, renderItemCards, renderItemsLoadingState, serialiseLocalEnvelope
 } from './items-view.js';
 import {
   MAX_BACKUP_BYTES, createBackupPayload, deterministicImportIdentity, replaceLocalAtomically, validateBackup
@@ -22,6 +22,7 @@ import {
   activeFilterSummary, actorLabel, copyPreviousEntry, deleteEntryTemplate, dismissOnboarding, filterEntries,
   isOnboardingDismissed, loadEntryTemplates, onboardingState, saveEntryTemplate
 } from './wallet-features.js';
+import { resolveStateIcon, stateIconMarkup, staticIconMarkup } from './state-icon-data.js';
 
 const STORE = 'family-wallet-v2-local-demo';
 const ENTRY_PREFS_STORE = 'family-wallet-v2-entry-preferences';
@@ -39,8 +40,35 @@ const seed = () => createLedger({ accounts: [
 ], transactions: [], appliedOperationIds: [] });
 
 const viewTitles = { overview:'概览', entries:'账目', accounts:'账户', items:'物品' };
-const walletIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M17 8v-3a1 1 0 0 0 -1 -1h-10a2 2 0 0 0 0 4h12a1 1 0 0 1 1 1v3M19 16v3a1 1 0 0 1 -1 1h-12a2 2 0 0 1 -2 -2v-12M20 12v4h-4a2 2 0 0 1 0 -4h4"/></svg>';
-const chevronIcon = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 6l6 6l-6 6"/></svg>';
+const viewIconFamilies = { overview:'nav-home', accounts:'nav-accounts', entries:'nav-entries', items:'nav-items' };
+const CATEGORY_ICON_ENDPOINTS = Object.freeze({
+  薪水:'category-salary', 购物:'category-shopping', 医疗:'category-medical', 房贷:'category-mortgage',
+  电费:'category-electric', 税费:'category-tax', 打油:'category-fuel', 汽车:'category-car', 其它:'category-other'
+});
+const dialogInvokers = new WeakMap();
+
+function setStateIcon(root, state) {
+  const icon = root?.matches?.('[data-state-icon]') ? root : root?.querySelector?.('[data-state-icon]');
+  if (!icon) return;
+  const target = resolveStateIcon(icon.dataset.stateIcon, state);
+  if (!target.valid || icon.dataset.iconState === target.state) return;
+  icon.dataset.iconState = target.state;
+}
+
+function entryIconEndpoint(entry) {
+  if (entry?.sourceType === 'itemPayment') return 'package-check';
+  if (entry?.kind === 'repayment') return 'payment-arrow';
+  if (entry?.kind === 'transfer') return 'transfer-arrows';
+  const category = String(entry?.category || '').trim();
+  if (category) return CATEGORY_ICON_ENDPOINTS[category] ?? 'category-other';
+  if (entry?.kind === 'income') return 'income-arrow';
+  if (entry?.kind === 'expense') return 'expense-arrow';
+  return 'neutral';
+}
+
+function transactionIconMarkup(entry) {
+  return staticIconMarkup(entryIconEndpoint(entry));
+}
 
 const hydratedLocal = hydrate();
 let ledger = hydratedLocal.ledger;
@@ -50,6 +78,7 @@ let saveLocked = false;
 let pendingOperationId = uid('op');
 let pendingAccountOperationId = uid('account');
 let toastTimer;
+let toastHideTimer;
 let viewTransitionTimer;
 let selectedMonth = today().slice(0, 7);
 let activeView = 'overview';
@@ -80,6 +109,8 @@ let currentItemPayments = [];
 let selectedItemId = null;
 let itemFilter = 'active';
 let itemListenerError = null;
+let itemReadState = { householdId:'local', generation:0, hasSnapshot:true, error:null };
+let itemPaymentReadState = { householdId:'local', itemId:null, generation:0, hasSnapshot:true, error:null };
 let mediaCache = new Map(hydratedLocal.itemMedia.map(media => [`local/${media.id}`, media]));
 let coverObserver = null;
 let pendingItemCreate = null;
@@ -91,12 +122,191 @@ let pendingRepayment = null;
 let repaymentReturnAccountId = null;
 let requestedPaymentId = null;
 const mediaLoads = new Map();
+const mediaLoadErrors = new Map();
 const itemActionOperations = new Map();
 let householdMembers = [];
 let householdPendingInvites = [];
 let memberReadGeneration = 0;
+let memberReadState = { householdId:'local', generation:0, membersKnown:true, invitesKnown:true, membersError:null, invitesError:null };
 let pendingRestore = null;
 let entryFilters = { keyword:'', kind:'all', accountId:'all', category:'all', dateFrom:'', dateTo:'', allMonths:false };
+const feedbackControls = new WeakMap();
+const balancedHandoffs = new Map();
+const TOAST_DURATIONS = Object.freeze({ neutral:2800, success:2800, warning:4500, error:4500 });
+const FEEDBACK_TONES = new Set(Object.keys(TOAST_DURATIONS));
+const FEEDBACK_ICON_PATHS = Object.freeze({
+  neutral:'M12 8h.01M11 12h1v4h1M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18',
+  success:'M20 6 9 17l-5-5M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18',
+  warning:'M12 9v4M12 17h.01M10.3 4.6 2.5 18a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 4.6a2 2 0 0 0-3.4 0',
+  error:'M9 9l6 6M15 9l-6 6M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18'
+});
+
+function feedbackIconMarkup(tone) {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${FEEDBACK_ICON_PATHS[tone] ?? FEEDBACK_ICON_PATHS.neutral}"/></svg>`;
+}
+
+function resolveFeedback(target) {
+  return typeof target === 'string' ? $(target) : target;
+}
+
+function ensureFeedbackRow(target) {
+  const feedback = resolveFeedback(target);
+  if (!feedback) return null;
+  feedback.classList.add('feedback-row');
+  let icon = feedback.querySelector('[data-feedback-icon]');
+  let text = feedback.querySelector('[data-feedback-text]');
+  if (!icon || !text) {
+    const current = feedback.textContent;
+    feedback.replaceChildren();
+    icon = document.createElement('span');
+    icon.className = 'feedback-icon';
+    icon.dataset.feedbackIcon = '';
+    icon.setAttribute('aria-hidden', 'true');
+    text = document.createElement('span');
+    text.dataset.feedbackText = '';
+    text.textContent = current;
+    feedback.append(icon, text);
+  }
+  return { feedback, icon, text };
+}
+
+function setFeedback(target, message, tone = 'neutral', control = null) {
+  if (!FEEDBACK_TONES.has(tone)) throw new TypeError(`Unknown feedback tone: ${tone}`);
+  const row = ensureFeedbackRow(target);
+  if (!row) return;
+  const { feedback, icon, text } = row;
+  for (const prior of feedbackControls.get(feedback) ?? []) {
+    prior.removeAttribute('aria-invalid');
+    const ids = (prior.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== feedback.id);
+    if (ids.length) prior.setAttribute('aria-describedby', ids.join(' '));
+    else prior.removeAttribute('aria-describedby');
+  }
+  feedbackControls.delete(feedback);
+  text.textContent = message || '';
+  icon.innerHTML = feedbackIconMarkup(tone);
+  feedback.dataset.tone = tone;
+  feedback.setAttribute('role', tone === 'error' ? 'alert' : 'status');
+  feedback.setAttribute('aria-live', tone === 'error' ? 'assertive' : 'polite');
+  if (message && control && feedback.id) {
+    const controls = (Array.isArray(control) ? control : [control]).filter(Boolean);
+    for (const owner of controls) {
+      owner.setAttribute('aria-invalid', tone === 'error' ? 'true' : 'false');
+      const ids = new Set((owner.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean));
+      ids.add(feedback.id);
+      owner.setAttribute('aria-describedby', [...ids].join(' '));
+    }
+    feedbackControls.set(feedback, controls);
+  }
+}
+
+function clearFeedback(target) {
+  setFeedback(target, '', 'neutral');
+}
+
+const FORM_ERROR_CONTROL_MAP = Object.freeze({
+  entryForm:[[/分类/, '#categoryRow'], [/转入账户|目标账户/, '#targetAccountTrigger'], [/账户/, '#sourceAccountTrigger'], [/金额|RM/, '#amountInput'], [/日期/, '#dateInput'], [/类型/, '#kindControl']],
+  accountForm:[[/账户名称|名称/, '#accountName'], [/账户类型|类型/, '#accountSubtypeControl'], [/信用额度/, '#creditLimit'], [/账单日|账单日期/, '#statementDay'], [/还款日/, '#dueDay'], [/贷款类型/, '#loanType'], [/计算方式/, '#loanCalculationMode'], [/年利率/, '#annualInterestRate'], [/原始融资额|原始应付/, '#originalPrincipal'], [/计划还款|月供/, '#scheduledPayment'], [/还清日期/, '#expectedPayoffDate'], [/余额|欠款/, '#openingBalance'], [/照片/, '#accountPhotoInput']],
+  repaymentForm:[[/资金来源/, '.repayment-funding-control'], [/付款账户|来源账户/, '#repaymentSourceAccountTrigger'], [/利息/, '#repaymentInterest'], [/日期/, '#repaymentDate'], [/金额|还款/, '#repaymentAmount']],
+  newItemForm:[[/物品名称|名称/, '#newItemName'], [/全价/, '#newItemFullPrice'], [/订金.*金额|订金不能/, '#newItemDepositAmount'], [/付款账户|账目联动/, '#newItemAccountTrigger'], [/订金.*日期|日期/, '#newItemDepositDate'], [/凭证/, '#newItemReceipt'], [/封面|图片|照片|媒体/, '#newItemCover']],
+  paymentForm:[[/付款账户|账目联动/, '#paymentAccountTrigger'], [/日期/, '#paymentDate'], [/凭证|图片|媒体/, '#paymentReceipt'], [/金额|余额|付款/, '#paymentAmount']],
+  editItemForm:[[/物品名称|名称/, '#editItemName'], [/日期/, '#editItemEtaDate'], [/封面|图片|照片|媒体/, '#editItemCover'], [/全价|金额/, '#editItemFullPrice']]
+});
+
+function focusableValidationControl(control) {
+  if (!control) return null;
+  if (control.hidden || control.getAttribute?.('aria-hidden') === 'true') {
+    const proxy = control.id ? $(`#${control.id}Trigger`) : null;
+    if (proxy) return proxy;
+  }
+  return control;
+}
+
+function reportSubmitError(feedbackTarget, form, error) {
+  const currentInvalid = form?.querySelector?.(':invalid');
+  const semantic = (FORM_ERROR_CONTROL_MAP[form?.id] || []).find(([pattern]) => pattern.test(String(error?.message || '')))?.[1];
+  const control = focusableValidationControl(currentInvalid) || (semantic ? $(semantic) : null);
+  setFeedback(feedbackTarget, error.message, 'error', control);
+  if (!control?.focus) return;
+  if (control.tabIndex < 0 && !control.matches?.('input, select, textarea, button, [tabindex]')) control.tabIndex = -1;
+  try { control.focus({ preventScroll:true }); }
+  catch { control.focus(); }
+}
+
+function initializeFeedbackRows() {
+  document.querySelectorAll('.form-message, .feedback-row').forEach(feedback => {
+    setFeedback(feedback, feedback.textContent, feedback.dataset.tone || 'neutral');
+  });
+}
+
+function ensureActionButton(button) {
+  if (!button || button.dataset.actionEnhanced === 'true') return button;
+  const label = button.textContent.trim();
+  button.dataset.actionEnhanced = 'true';
+  button.dataset.actionLabel = label;
+  button.dataset.actionState = 'idle';
+  button.innerHTML = `${stateIconMarkup('action', 'idle')}<span data-action-label>${escapeHtml(label)}</span>`;
+  return button;
+}
+
+function setActionButtonState(button, state, { label = null } = {}) {
+  if (!['idle', 'pending', 'success', 'error'].includes(state) || !ensureActionButton(button)) return;
+  if (state === 'pending' && button.dataset.actionPreviousDisabled === undefined) {
+    button.dataset.actionPreviousDisabled = String(button.disabled);
+  }
+  button.dataset.actionState = state;
+  setStateIcon(button, state);
+  const visibleLabel = button.querySelector('[data-action-label]');
+  if (visibleLabel) visibleLabel.textContent = label ?? button.dataset.actionLabel;
+  if (state === 'pending') {
+    button.setAttribute('aria-busy', 'true');
+    button.disabled = true;
+  } else {
+    button.removeAttribute('aria-busy');
+  }
+}
+
+function releaseActionButton(button, state = null) {
+  if (!button) return;
+  if (state) setActionButtonState(button, state);
+  button.removeAttribute('aria-busy');
+  if (button.dataset.actionPreviousDisabled !== undefined) {
+    const previousDisabled = button.dataset.actionPreviousDisabled === 'true';
+    button.disabled = previousDisabled;
+    delete button.dataset.actionPreviousDisabled;
+  }
+}
+
+function resetActionButton(button, label = null) {
+  if (!button) return;
+  ensureActionButton(button);
+  if (label !== null) button.dataset.actionLabel = label;
+  releaseActionButton(button, 'idle');
+}
+
+function initializeActionButtons() {
+  for (const id of [
+    'googleSignInButton', 'acceptInviteButton', 'sendInviteButton', 'saveEntryButton', 'saveAccountButton',
+    'saveRepaymentButton', 'saveNewItemButton', 'savePaymentButton', 'saveEditItemButton', 'exportButton',
+    'confirmRestoreButton', 'refreshMembersButton', 'archiveItemButton', 'restoreItemButton', 'deleteItemButton'
+  ]) resetActionButton($(`#${id}`));
+}
+
+function queueBalancedHandoff(kind, id) {
+  if (!id || !['transaction', 'account', 'item', 'payment'].includes(kind)) return;
+  balancedHandoffs.set(`${kind}:${id}`, { kind, id });
+  requestAnimationFrame(applyBalancedHandoffs);
+}
+
+function applyBalancedHandoffs() {
+  const attributes = { transaction:'data-transaction-id', account:'data-account-id', item:'data-item-id', payment:'data-payment-id' };
+  for (const [key, handoff] of balancedHandoffs) {
+    const element = document.querySelector(`[${attributes[handoff.kind]}="${CSS.escape(handoff.id)}"]`);
+    if (!element) continue;
+    balancedHandoffs.delete(key);
+    element.classList.add('balanced-handoff');
+    setTimeout(() => element.classList.remove('balanced-handoff'), 220);
+  }
+}
 
 const syncCoordinator = createSyncCoordinator({
   applyOperation:mergePendingLedgerPatch,
@@ -137,7 +347,10 @@ function applyTheme(theme, { persist = true } = {}) {
   const selected = THEMES.has(theme) ? theme : 'teal';
   document.documentElement.dataset.theme = selected;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#f3f7f6');
-  document.querySelectorAll('input[name="appTheme"]').forEach(input => { input.checked = input.value === selected; });
+  document.querySelectorAll('input[name="appTheme"]').forEach(input => {
+    input.checked = input.value === selected;
+    setStateIcon(input.closest('label'), input.checked ? 'selected' : 'idle');
+  });
   if (persist) localStorage.setItem(THEME_STORE, selected);
   return selected;
 }
@@ -155,8 +368,8 @@ function showApp() {
   $('#bottomNav').hidden = false;
 }
 
-function showAuth(message) {
-  $('#authMessage').textContent = message;
+function showAuth(message, tone = 'neutral') {
+  setFeedback('#authMessage', message, tone);
   $('#authGate').hidden = false;
   $('#appShell').hidden = true;
   $('#desktopSidebar').hidden = true;
@@ -165,9 +378,12 @@ function showAuth(message) {
 
 function setSyncState(message, bad = false, state = '') {
   const badge = $('#syncBadge');
-  badge.textContent = message;
+  const label = badge.querySelector('[data-sync-label]');
+  if (label) label.textContent = message;
+  else badge.textContent = message;
   badge.classList.toggle('bad', bad);
   badge.dataset.state = state;
+  setStateIcon(badge, ['loading', 'cached', 'pending', 'synced', 'offline', 'recovering', 'error', 'update'].includes(state) ? state : 'idle');
   const freshness = $('#desktopFreshness');
   if (freshness) freshness.textContent = `资料状态：${message}`;
 }
@@ -177,7 +393,7 @@ function renderSyncStatus(state = syncCoordinator.getState()) {
   const status = state.status === 'offline' ? 'offline' : itemListenerError ? 'error' : state.status;
   const labels = {
     loading:'载入中', cached:'已缓存', pending:state.pendingCount ? `${state.pendingCount} 项待同步` : '待同步',
-    synced:'已同步 ↻', offline:state.pendingCount ? `离线 · ${state.pendingCount} 项排队` : '离线',
+    synced:'已同步', offline:state.pendingCount ? `离线 · ${state.pendingCount} 项排队` : '离线',
     recovering:'恢复中', error:'同步错误 · 重试'
   };
   setSyncState(labels[status] ?? '准备中', status === 'error', status);
@@ -204,6 +420,7 @@ function applyCoordinatorState(state) {
   renderSyncStatus(state);
   const raw = state.data;
   if (!raw?.household || raw.household.id !== state.householdId) return;
+  const previousHouseholdId = currentHousehold?.id ?? null;
   cloudRawState = raw;
   currentHousehold = raw.household;
   ledger = deriveLedger({ accounts:raw.accounts, transactions:raw.transactions });
@@ -212,8 +429,11 @@ function applyCoordinatorState(state) {
     householdSwitchHasSnapshot = true;
     householdSwitchPreviousId = null;
     setSwitching(false);
-    itemRecords = [];
-    currentItemPayments = [];
+    if (previousHouseholdId !== currentHousehold.id) {
+      itemRecords = [];
+      currentItemPayments = [];
+      mediaLoadErrors.clear();
+    }
     renderItemsView();
     restartItemsListener(currentHousehold.id);
     restartMembersListener(currentHousehold.id);
@@ -238,6 +458,8 @@ function dialogMotionPanel(dialog) {
 
 function showDialog(dialog, afterOpen) {
   if (!dialog || dialog.open) return;
+  const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  if (invoker && !dialog.contains(invoker)) dialogInvokers.set(dialog, invoker);
   dialog.classList.remove('is-open', 'is-closing');
   dialog.classList.add('is-preparing');
   dialog.showModal();
@@ -266,7 +488,15 @@ function dismissDialog(dialog, afterClose) {
     panel?.removeEventListener('transitionend', onTransitionEnd);
     dialog.classList.remove('is-preparing', 'is-open', 'is-closing');
     if (dialog.open) dialog.close();
-    afterClose?.();
+    if (afterClose) {
+      dialogInvokers.delete(dialog);
+      afterClose();
+    }
+    else {
+      const invoker = dialogInvokers.get(dialog);
+      dialogInvokers.delete(dialog);
+      if (invoker?.isConnected && !invoker.hidden && !invoker.closest('[hidden]')) invoker.focus({ preventScroll:true });
+    }
   };
   const onTransitionEnd = event => {
     if (event.target !== panel || !['opacity', 'transform'].includes(event.propertyName)) return;
@@ -321,12 +551,14 @@ async function applyLedgerChange(nextLedger, cloudWrite, pendingPatch = null) {
   }
   ledger = nextLedger;
   render();
-  Promise.resolve(writePromise).then(
-    () => syncCoordinator.acknowledgeWrite(token),
-    error => {
-      if (syncCoordinator.rejectWrite(token, error)) showToast(`未能同步：${error.message}`);
-    }
-  );
+  try {
+    const acknowledgement = await Promise.resolve(writePromise);
+    syncCoordinator.acknowledgeWrite(token);
+    return acknowledgement;
+  } catch (error) {
+    syncCoordinator.rejectWrite(token, error);
+    throw error;
+  }
 }
 function activeAccounts() { return ledger.accounts.filter(account => !account.archivedAt); }
 function accountById(id) { return ledger.accounts.find(account => account.id === id) || null; }
@@ -348,7 +580,7 @@ function accountSubtypeLabel(account) {
 function accountAvatarMarkup(account) {
   return account?.photoDataUrl
     ? `<img src="${escapeHtml(account.photoDataUrl)}" alt="">`
-    : walletIcon;
+    : stateIconMarkup('account', accountSubtype(account) === 'credit_card' ? 'credit' : accountSubtype(account) === 'loan' ? 'loan' : 'idle');
 }
 
 function accountFlowLabel(entry) {
@@ -396,12 +628,26 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 }
 
-function showToast(message) {
+function showToast(message, tone) {
+  if (!FEEDBACK_TONES.has(tone)) throw new TypeError(`Unknown toast tone: ${tone}`);
   const toast = $('#toast');
-  toast.textContent = message;
-  toast.classList.add('show');
+  const actionFailure = tone === 'warning' || tone === 'error';
+  const repeated = toast.classList.contains('is-visible') && toast.dataset.message === String(message) && toast.dataset.tone === tone;
+  toast.dataset.message = String(message);
+  toast.dataset.tone = tone;
+  toast.querySelector('[data-toast-text]').textContent = message;
+  toast.querySelector('[data-feedback-icon]').innerHTML = feedbackIconMarkup(tone);
+  toast.setAttribute('role', actionFailure ? 'alert' : 'status');
+  toast.setAttribute('aria-live', actionFailure ? 'assertive' : 'polite');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
+  clearTimeout(toastHideTimer);
+  toast.classList.remove('is-hiding');
+  if (!repeated) toast.classList.add('is-visible');
+  toastTimer = setTimeout(() => {
+    toast.classList.add('is-hiding');
+    toast.classList.remove('is-visible');
+    toastHideTimer = setTimeout(() => toast.classList.remove('is-hiding'), 120);
+  }, TOAST_DURATIONS[tone]);
 }
 
 function dateLabel(value) {
@@ -421,7 +667,7 @@ function currentScope() {
 }
 function visibleActor(uidValue) { return actorLabel(uidValue, currentActorUid(), householdMembers); }
 
-function setView(view, scroll = true) {
+function setView(view, scroll = true, animate = false) {
   if (!viewTitles[view]) return;
   activeView = view;
   document.querySelectorAll('[data-view]').forEach(section => { section.hidden = section.dataset.view !== view; });
@@ -430,16 +676,19 @@ function setView(view, scroll = true) {
     button.classList.toggle('active', current);
     if (current) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
+    setStateIcon(button, current ? 'active' : 'idle');
   });
   $('#viewTitle').textContent = viewTitles[view];
   const contextAction = $('#desktopContextAction');
   if (contextAction) contextAction.textContent = view === 'accounts' ? '新增账户' : view === 'items' ? '新增物品' : '新增账目';
   const activeSection = document.querySelector(`[data-view="${view}"]`);
   document.querySelectorAll('[data-view-transition]').forEach(section => section.removeAttribute('data-view-transition'));
-  activeSection?.setAttribute('data-view-transition', 'entering');
+  if (animate && !prefersReducedMotion()) activeSection?.setAttribute('data-view-transition', 'entering');
   clearTimeout(viewTransitionTimer);
-  viewTransitionTimer = setTimeout(() => activeSection?.removeAttribute('data-view-transition'), 220);
-  if (scroll) window.scrollTo({ top:0, behavior:'smooth' });
+  viewTransitionTimer = animate && !prefersReducedMotion()
+    ? setTimeout(() => activeSection?.removeAttribute('data-view-transition'), 220)
+    : null;
+  if (scroll) window.scrollTo({ top:0, behavior:prefersReducedMotion() ? 'auto' : 'smooth' });
 }
 
 function currentMediaHouseholdId() {
@@ -474,19 +723,52 @@ async function loadMediaOnce(householdId, mediaId) {
   return request;
 }
 
+async function retryCoverMedia(householdId, mediaId, itemId = null) {
+  const key = mediaKey(householdId, mediaId);
+  mediaLoads.delete(key);
+  mediaCache.delete(key);
+  mediaLoadErrors.delete(key);
+  renderItemsView();
+  if (itemId === selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
+  try {
+    await loadMediaOnce(householdId, mediaId);
+  } catch (error) {
+    mediaLoadErrors.set(key, error);
+    throw error;
+  } finally {
+    if (householdId === currentMediaHouseholdId()) {
+      renderItemsView();
+      if (itemId === selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
+    }
+  }
+}
+
+function markCoverImageError(householdId, mediaId, itemId = null) {
+  const key = mediaKey(householdId, mediaId);
+  mediaLoadErrors.set(key, new Error('封面图片无法显示'));
+  renderItemsView();
+  if (itemId === selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
+}
+
 function observeLazyCovers() {
   coverObserver?.disconnect();
   coverObserver = null;
   const householdId = currentMediaHouseholdId();
   const targets = [...$('#itemsGrid').querySelectorAll('[data-cover-media-id]')]
-    .filter(target => !mediaCache.has(mediaKey(householdId, target.dataset.coverMediaId)));
+    .filter(target => !mediaCache.has(mediaKey(householdId, target.dataset.coverMediaId))
+      && !mediaLoadErrors.has(mediaKey(householdId, target.dataset.coverMediaId)));
   if (!targets.length) return;
   const loadTargets = targetsToLoad => Promise.allSettled(targetsToLoad.map(target =>
     loadMediaOnce(householdId, target.dataset.coverMediaId)
   )).then(results => {
     if (householdId !== currentMediaHouseholdId()) return;
     const failure = results.find(result => result.status === 'rejected');
-    if (failure) $('#itemsMessage').textContent = `封面载入失败：${failure.reason.message}`;
+    if (failure) {
+      const failedIndex = results.indexOf(failure);
+      const failedTarget = targetsToLoad[failedIndex];
+      if (failedTarget) mediaLoadErrors.set(mediaKey(householdId, failedTarget.dataset.coverMediaId), failure.reason);
+      setFeedback('#itemsMessage', `封面载入失败：${failure.reason.message}`, 'error');
+    }
     renderItemsView();
   });
   if (!('IntersectionObserver' in window)) {
@@ -508,10 +790,22 @@ function renderItemsView() {
     ? item.status === 'archived' || Boolean(item.archivedAt)
     : item.status !== 'archived' && !item.archivedAt
   ).sort((a, b) => String(b.updatedAt ?? b.createdAt ?? '').localeCompare(String(a.updatedAt ?? a.createdAt ?? '')));
-  $('#itemsMessage').textContent = itemListenerError ? `物品实时更新中断：${itemListenerError}` : '';
-  $('#itemsGrid').innerHTML = renderItemCards(visible, {
+  const awaitingFirstSnapshot = usesCloudStore() && itemReadState.householdId === desiredHouseholdId && !itemReadState.hasSnapshot;
+  const readError = itemReadState.error || itemListenerError;
+  const freshnessMessage = readError
+    ? `物品实时更新中断：${readError}`
+    : awaitingFirstSnapshot
+      ? (visible.length ? '正在更新物品，暂时显示上次资料。' : '正在载入物品，请稍候。')
+      : '';
+  setFeedback('#itemsMessage', freshnessMessage, readError ? 'error' : 'neutral');
+  $('#itemsGrid').innerHTML = awaitingFirstSnapshot && !visible.length
+    ? renderItemsLoadingState('正在载入物品，请稍候。')
+    : readError && !visible.length && !itemReadState.hasSnapshot
+      ? renderItemsLoadingState(`物品载入失败：${readError}`, 'error')
+      : renderItemCards(visible, {
     formatMoney:formatRM,
     mediaCache,
+    mediaErrors:mediaLoadErrors,
     householdId:currentMediaHouseholdId()
   });
   $('#itemsGrid').querySelectorAll('[data-item-id]').forEach(button => {
@@ -520,7 +814,23 @@ function renderItemsView() {
   $('#itemsGrid').querySelectorAll('[data-new-item]').forEach(button => {
     button.addEventListener('click', openNewItem);
   });
+  $('#itemsGrid').querySelectorAll('[data-retry-cover]').forEach(button => {
+    button.addEventListener('click', async () => {
+      setActionButtonState(button, 'pending', { label:'重试中…' });
+      try {
+        await retryCoverMedia(currentMediaHouseholdId(), button.dataset.retryCover, button.dataset.retryItem);
+      } catch (error) {
+        setFeedback('#itemsMessage', `封面载入失败：${error.message}`, 'error', button);
+      } finally {
+        releaseActionButton(button);
+      }
+    });
+  });
+  $('#itemsGrid').querySelectorAll('[data-cover-image-id]').forEach(image => {
+    image.addEventListener('error', () => markCoverImageError(currentMediaHouseholdId(), image.dataset.coverImageId, image.closest('[data-item-id]')?.dataset.itemId), { once:true });
+  });
   observeLazyCovers();
+  applyBalancedHandoffs();
 }
 
 function clearReceiptViewer() {
@@ -536,10 +846,8 @@ function closeReceiptViewer() {
 
 async function showReceipt(payment, button) {
   if (!payment?.receiptMediaId) return;
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '载入中…';
-  $('#itemDetailMessage').textContent = '';
+  setActionButtonState(button, 'pending', { label:'查看凭证' });
+  clearFeedback('#itemDetailMessage');
   try {
     const media = await loadMediaOnce(currentMediaHouseholdId(), payment.receiptMediaId);
     if (!media?.dataUrl) throw new Error('找不到付款凭证');
@@ -553,14 +861,109 @@ async function showReceipt(payment, button) {
     saveLink.href = media.dataUrl;
     saveLink.download = `family-wallet-${payment.type === 'deposit' ? 'deposit' : 'payment'}-${String(payment.occurredAt ?? today()).slice(0, 10)}.jpg`;
     saveLink.hidden = false;
+    setActionButtonState(button, 'success');
     if (!$('#receiptViewerDialog').open) showDialog($('#receiptViewerDialog'));
   } catch (error) {
-    $('#itemDetailMessage').textContent = `无法读取凭证：${error.message}`;
+    setActionButtonState(button, 'error');
+    setFeedback('#itemDetailMessage', `无法读取凭证：${error.message}`, 'error', button);
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 }
+
+let paymentMenuPortal = null;
+let paymentMenuOwner = null;
+
+function restorePaymentMenuPortal() {
+  if (paymentMenuPortal && paymentMenuOwner?.isConnected) {
+    paymentMenuPortal.removeAttribute('style');
+    paymentMenuOwner.append(paymentMenuPortal);
+  } else paymentMenuPortal?.remove();
+  paymentMenuPortal = null;
+  paymentMenuOwner = null;
+}
+
+function closePaymentCorrectionMenus(except = null) {
+  if (paymentMenuOwner && paymentMenuOwner !== except) {
+    const owner = paymentMenuOwner;
+    restorePaymentMenuPortal();
+    owner.open = false;
+  }
+  $('#itemPaymentTimeline')?.querySelectorAll('.payment-menu[open]').forEach(menu => {
+    if (menu !== except) menu.open = false;
+  });
+}
+
+function paymentMenuViewportBounds() {
+  const viewport = window.visualViewport;
+  const left = Number.isFinite(viewport?.offsetLeft) ? viewport.offsetLeft : 0;
+  const top = Number.isFinite(viewport?.offsetTop) ? viewport.offsetTop : 0;
+  const width = Number.isFinite(viewport?.width) && viewport.width > 0 ? viewport.width : window.innerWidth;
+  const height = Number.isFinite(viewport?.height) && viewport.height > 0 ? viewport.height : window.innerHeight;
+  return { left, top, right:left + width, bottom:top + height };
+}
+
+function clampPaymentMenuToViewport(popover) {
+  const margin = 8;
+  const viewport = paymentMenuViewportBounds();
+  const availableWidth = Math.max(0, viewport.right - viewport.left - margin * 2);
+  const availableHeight = Math.max(0, viewport.bottom - viewport.top - margin * 2);
+  const firstRect = popover.getBoundingClientRect();
+  if (firstRect.width > availableWidth) popover.style.maxWidth = `${availableWidth}px`;
+  if (firstRect.height > availableHeight) popover.style.maxHeight = `${availableHeight}px`;
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const rect = popover.getBoundingClientRect();
+    const minLeft = viewport.left + margin;
+    const minTop = viewport.top + margin;
+    const maxLeft = viewport.right - margin - rect.width;
+    const maxTop = viewport.bottom - margin - rect.height;
+    const desiredLeft = maxLeft < minLeft ? minLeft : Math.max(minLeft, Math.min(maxLeft, rect.left));
+    const desiredTop = maxTop < minTop ? minTop : Math.max(minTop, Math.min(maxTop, rect.top));
+    const deltaLeft = desiredLeft - rect.left;
+    const deltaTop = desiredTop - rect.top;
+    if (Math.abs(deltaLeft) < 0.5 && Math.abs(deltaTop) < 0.5) break;
+    popover.style.left = `${(Number.parseFloat(popover.style.left) || 0) + deltaLeft}px`;
+    popover.style.top = `${(Number.parseFloat(popover.style.top) || 0) + deltaTop}px`;
+  }
+}
+
+function portalPaymentMenu(menu) {
+  const popover = menu.querySelector('.payment-menu-popover');
+  const summary = menu.querySelector('summary');
+  if (!popover || !summary) return;
+  closePaymentCorrectionMenus(menu);
+  restorePaymentMenuPortal();
+  const rect = summary.getBoundingClientRect();
+  paymentMenuPortal = popover;
+  paymentMenuOwner = menu;
+  $('#itemDetailDialog').append(popover);
+  popover.style.position = 'fixed';
+  popover.style.visibility = 'hidden';
+  popover.style.left = '8px';
+  popover.style.top = '8px';
+  const viewport = paymentMenuViewportBounds();
+  const width = popover.offsetWidth;
+  const height = popover.offsetHeight;
+  const minLeft = viewport.left + 8;
+  const maxLeft = viewport.right - width - 8;
+  const left = maxLeft < minLeft ? minLeft : Math.max(minLeft, Math.min(maxLeft, rect.right - width));
+  const below = rect.bottom + 6;
+  const top = below + height <= viewport.bottom - 8 ? below : Math.max(viewport.top + 8, rect.top - height - 6);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+  popover.style.visibility = 'visible';
+  clampPaymentMenuToViewport(popover);
+}
+
+document.addEventListener('pointerdown', event => {
+  if (!paymentMenuOwner) return;
+  if (event.target.closest?.('.payment-menu-popover')) return;
+  if (event.target.closest?.('.payment-menu') === paymentMenuOwner) return;
+  closePaymentCorrectionMenus();
+});
+window.addEventListener('resize', closePaymentCorrectionMenus);
+window.addEventListener('scroll', closePaymentCorrectionMenus, true);
 
 function paymentTimelineMarkup(payments) {
   if (!payments.length) return '<div class="empty-state"><b>还没有付款</b><p>记录订金或第一期后会显示在这里。</p></div>';
@@ -571,24 +974,29 @@ function paymentTimelineMarkup(payments) {
       const linked = payment.mode === 'linked';
       const label = payment.type === 'deposit' ? '订金' : '付款';
       const receipt = payment.receiptMediaId
-        ? `<button class="minor-button" type="button" data-view-receipt="${escapeHtml(payment.id)}">查看凭证</button>` : '';
+        ? `<button class="minor-button icon-label-button" type="button" data-view-receipt="${escapeHtml(payment.id)}">${stateIconMarkup('receipt', 'idle')}<span>查看凭证</span></button>` : '';
       const correction = voided
-        ? `<button class="minor-button" data-restore-payment="${escapeHtml(payment.id)}" type="button">恢复付款</button>`
-        : `<button class="minor-button delete" data-void-payment="${escapeHtml(payment.id)}" type="button">作废付款</button>`;
-      const menu = `<details class="payment-menu"><summary class="minor-button" aria-label="付款更正菜单">⋯</summary><div class="payment-menu-popover">${correction}</div></details>`;
+        ? `<button class="minor-button icon-label-button" data-restore-payment="${escapeHtml(payment.id)}" type="button">${stateIconMarkup('correction', 'restore')}<span>恢复付款</span></button>`
+        : `<button class="minor-button delete icon-label-button" data-void-payment="${escapeHtml(payment.id)}" type="button">${stateIconMarkup('correction', 'void')}<span>作废付款</span></button>`;
+      const menu = `<details class="payment-menu"><summary class="minor-button" aria-label="付款更正菜单">${stateIconMarkup('menu', 'closed')}</summary><div class="payment-menu-popover">${correction}</div></details>`;
       const actor = visibleActor(payment.actorUid ?? payment.createdBy ?? payment.updatedByUid);
-      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div><b>${label} · ${formatRM(payment.amountMinor)}</b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)} · ${escapeHtml(actor)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${menu}</div></div>`;
+      return `<div class="payment-row ${voided ? 'voided' : ''}" data-payment-id="${escapeHtml(payment.id)}"><div class="payment-row-main"><b>${stateIconMarkup('correction', voided ? 'void' : 'active')}<span>${label} · ${formatRM(payment.amountMinor)}</span></b><small><span class="payment-badge">${linked ? '已联动账目' : '独立付款'}</span>${dateLabel(payment.occurredAt ?? payment.createdAt)} · ${escapeHtml(actor)}${payment.note ? ` · ${escapeHtml(payment.note)}` : ''}${voided ? ' · 已作废' : ''}</small></div><div class="payment-row-actions">${receipt}${menu}</div></div>`;
     }).join('');
 }
 
 function renderItemDetail() {
+  closePaymentCorrectionMenus();
   const item = normaliseDisplayItem(itemById(selectedItemId));
   if (!item) {
-    $('#itemDetailMessage').textContent = '物品已不存在或尚未同步。';
+    $('#itemDetailDialog').removeAttribute('data-item-id');
+    setFeedback('#itemDetailMessage', '物品已不存在或尚未同步。', 'warning');
     return;
   }
+  $('#itemDetailDialog').setAttribute('data-item-id', item.id);
   $('#itemDetailName').textContent = item.name;
-  $('#itemDetailState').textContent = item.status === 'archived' ? '已归档' : item.status === 'completed' ? '已付清' : '收藏中';
+  const itemState = $('#itemDetailState');
+  itemState.querySelector('b').textContent = item.status === 'archived' ? '已归档' : item.status === 'completed' ? '已付清' : '收藏中';
+  setStateIcon(itemState, item.status === 'archived' ? 'archive' : item.status === 'completed' ? 'complete' : 'idle');
   $('#itemDetailBalance').textContent = formatRM(item.balanceMinor);
   $('#itemDetailPaid').textContent = `已付 ${formatRM(item.paidMinor)} / ${formatRM(item.fullPriceMinor)}`;
   $('#itemDetailProgress').style.width = `${item.progress}%`;
@@ -596,7 +1004,7 @@ function renderItemDetail() {
   $('#itemDetailEta').textContent = etaDescription;
   $('#itemDetailEta').hidden = !etaDescription;
   $('#itemDetailNote').textContent = item.note || '暂无备注';
-  $('#itemDetailMessage').textContent = '';
+  if (!itemPaymentReadState.error) clearFeedback('#itemDetailMessage');
   const archived = item.status === 'archived';
   $('#payItemFullButton').disabled = archived || item.balanceMinor <= 0;
   $('#payItemPartButton').disabled = archived || item.balanceMinor <= 0;
@@ -604,39 +1012,92 @@ function renderItemDetail() {
   $('#archiveItemButton').hidden = archived || item.status !== 'completed';
   $('#restoreItemButton').hidden = !archived;
   $('#deleteItemButton').hidden = archived;
-  $('#itemPaymentCount').textContent = `${currentItemPayments.length} 笔记录`;
-  $('#itemPaymentTimeline').innerHTML = paymentTimelineMarkup(currentItemPayments);
   const householdId = currentMediaHouseholdId();
-  const cover = item.coverMediaId ? mediaCache.get(mediaKey(householdId, item.coverMediaId)) : null;
-  $('#itemDetailCover').innerHTML = cover?.dataUrl
-    ? `<img src="${escapeHtml(cover.dataUrl)}" alt="${escapeHtml(item.name)} 封面">`
-    : '<div class="item-cover-placeholder"><span aria-hidden="true">FW</span><small>暂无封面</small></div>';
+  const awaitingPayments = usesCloudStore()
+    && itemPaymentReadState.itemId === item.id
+    && itemPaymentReadState.householdId === householdId
+    && !itemPaymentReadState.hasSnapshot;
+  $('#itemPaymentCount').textContent = itemPaymentReadState.error
+    ? '付款记录暂时无法更新'
+    : awaitingPayments
+      ? '正在载入付款记录…'
+      : `${currentItemPayments.length} 笔记录`;
+  $('#itemPaymentTimeline').innerHTML = itemPaymentReadState.error && !currentItemPayments.length
+    ? `<div class="timeline-read-state error" role="status">付款记录载入失败：${escapeHtml(itemPaymentReadState.error)}</div>`
+    : awaitingPayments
+      ? `${currentItemPayments.length ? paymentTimelineMarkup(currentItemPayments) : ''}<div class="timeline-read-state" role="status">${stateIconMarkup('item-payment', 'pending')}<span>${currentItemPayments.length ? '正在更新，暂时显示上次付款记录。' : '正在载入付款记录，请稍候。'}</span></div>`
+      : paymentTimelineMarkup(currentItemPayments);
+  const coverKey = item.coverMediaId ? mediaKey(householdId, item.coverMediaId) : null;
+  const cover = coverKey ? mediaCache.get(coverKey) : null;
+  const coverError = coverKey ? mediaLoadErrors.get(coverKey) : null;
+  $('#itemDetailCover').innerHTML = cover?.dataUrl && !coverError
+    ? `<img src="${escapeHtml(cover.dataUrl)}" alt="${escapeHtml(item.name)} 封面" data-detail-cover-image="${escapeHtml(item.coverMediaId)}">`
+    : coverError
+      ? `<div class="item-cover-error" role="status">${stateIconMarkup('item-cover', 'error')}<small>封面载入失败</small><button class="minor-button" type="button" data-retry-detail-cover="${escapeHtml(item.coverMediaId)}">${stateIconMarkup('receipt', 'retry')}<span>重试</span></button></div>`
+      : `<div class="item-cover-placeholder"><span class="item-cover-placeholder-icon">${stateIconMarkup('item-cover', 'idle')}</span><small>暂无封面</small></div>`;
+  $('#itemDetailCover').querySelector('[data-detail-cover-image]')?.addEventListener('error', event => {
+    markCoverImageError(householdId, event.currentTarget.dataset.detailCoverImage, item.id);
+  }, { once:true });
+  $('#itemDetailCover').querySelector('[data-retry-detail-cover]')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    setActionButtonState(button, 'pending', { label:'重试中…' });
+    try {
+      await retryCoverMedia(householdId, button.dataset.retryDetailCover, item.id);
+    } catch (error) {
+      setFeedback('#itemDetailMessage', `封面载入失败：${error.message}`, 'error', button);
+    } finally {
+      releaseActionButton(button);
+    }
+  });
+  $('#itemPaymentTimeline').querySelectorAll('.payment-menu').forEach(menu => menu.addEventListener('toggle', () => {
+    setStateIcon(menu, menu.open ? 'open' : 'closed');
+    if (menu.open) portalPaymentMenu(menu);
+    else if (paymentMenuOwner === menu) restorePaymentMenuPortal();
+  }));
   $('#itemPaymentTimeline').querySelectorAll('[data-view-receipt]').forEach(button => {
     button.addEventListener('click', () => showReceipt(currentItemPayments.find(payment => payment.id === button.dataset.viewReceipt), button));
   });
   $('#itemPaymentTimeline').querySelectorAll('[data-void-payment]').forEach(button => {
-    button.addEventListener('click', () => correctItemPayment('void', button.dataset.voidPayment, button));
+    button.addEventListener('click', () => {
+      closePaymentCorrectionMenus();
+      correctItemPayment('void', button.dataset.voidPayment, button);
+    });
   });
   $('#itemPaymentTimeline').querySelectorAll('[data-restore-payment]').forEach(button => {
-    button.addEventListener('click', () => correctItemPayment('restore', button.dataset.restorePayment, button));
+    button.addEventListener('click', () => {
+      closePaymentCorrectionMenus();
+      correctItemPayment('restore', button.dataset.restorePayment, button);
+    });
   });
   if (requestedPaymentId) {
     const paymentId = requestedPaymentId;
     requestedPaymentId = null;
-    setTimeout(() => $('#itemPaymentTimeline').querySelector(`[data-payment-id="${CSS.escape(paymentId)}"]`)?.scrollIntoView({ behavior:'smooth', block:'center' }), 40);
+    setTimeout(() => $('#itemPaymentTimeline').querySelector(`[data-payment-id="${CSS.escape(paymentId)}"]`)?.scrollIntoView({ behavior:prefersReducedMotion() ? 'auto' : 'smooth', block:'center' }), 40);
   }
+  applyBalancedHandoffs();
 }
 
 function restartItemPaymentsListener(householdId, itemId) {
   stopItemPaymentsWatch?.();
   stopItemPaymentsWatch = null;
   if (!usesCloudStore() || !householdId || !itemId || !$('#itemDetailDialog').open) return;
+  const sameScope = itemPaymentReadState.householdId === householdId && itemPaymentReadState.itemId === itemId;
+  if (!sameScope) currentItemPayments = [];
+  const generation = itemPaymentReadState.generation + 1;
+  itemPaymentReadState = { householdId, itemId, generation, hasSnapshot:false, error:null };
+  renderItemDetail();
   stopItemPaymentsWatch = cloud.subscribeItemPayments(householdId, itemId, state => {
-    if (selectedItemId !== itemId || currentMediaHouseholdId() !== householdId || !$('#itemDetailDialog').open) return;
+    if (generation !== itemPaymentReadState.generation || selectedItemId !== itemId || currentMediaHouseholdId() !== householdId || !$('#itemDetailDialog').open) return;
+    itemPaymentReadState = { ...itemPaymentReadState, hasSnapshot:true, error:null };
     currentItemPayments = state.payments.map(normalisePayment);
     renderItemDetail();
   }, error => {
-    if (selectedItemId === itemId && $('#itemDetailDialog').open) $('#itemDetailMessage').textContent = `付款时间线更新中断：${error.message}`;
+    if (generation !== itemPaymentReadState.generation || selectedItemId !== itemId || currentMediaHouseholdId() !== householdId) return;
+    itemPaymentReadState = { ...itemPaymentReadState, error:error.message };
+    if ($('#itemDetailDialog').open) {
+      setFeedback('#itemDetailMessage', `付款时间线更新中断：${error.message}`, 'error');
+      renderItemDetail();
+    }
   });
 }
 
@@ -646,6 +1107,8 @@ function cleanupItemDetail() {
   selectedItemId = null;
   requestedPaymentId = null;
   currentItemPayments = [];
+  itemPaymentReadState = { householdId:null, itemId:null, generation:itemPaymentReadState.generation + 1, hasSnapshot:false, error:null };
+  closePaymentCorrectionMenus();
   clearReceiptViewer();
 }
 
@@ -657,7 +1120,7 @@ function closeItemDetail(afterClose) {
 function openItemDetail(itemId, paymentId = null) {
   const item = itemById(itemId);
   if (!item || item.deletedAt) {
-    showToast('物品尚未同步或已被移除。');
+    showToast('物品尚未同步或已被移除。', 'warning');
     return;
   }
   stopItemPaymentsWatch?.();
@@ -668,6 +1131,9 @@ function openItemDetail(itemId, paymentId = null) {
   currentItemPayments = runtimeMode === 'local'
     ? itemsState.itemPayments.filter(payment => payment.itemId === itemId).map(normalisePayment)
     : [];
+  itemPaymentReadState = runtimeMode === 'local'
+    ? { householdId:'local', itemId, generation:itemPaymentReadState.generation + 1, hasSnapshot:true, error:null }
+    : { householdId:currentMediaHouseholdId(), itemId, generation:itemPaymentReadState.generation, hasSnapshot:false, error:null };
   renderItemDetail();
   if (!$('#itemDetailDialog').open) showDialog($('#itemDetailDialog'));
   if (usesCloudStore()) restartItemPaymentsListener(currentHousehold.id, itemId);
@@ -676,7 +1142,11 @@ function openItemDetail(itemId, paymentId = null) {
     loadMediaOnce(householdId, item.coverMediaId).then(() => {
       if (selectedItemId === itemId && $('#itemDetailDialog').open && householdId === currentMediaHouseholdId()) renderItemDetail();
     }).catch(error => {
-      if (selectedItemId === itemId) $('#itemDetailMessage').textContent = `封面载入失败：${error.message}`;
+      mediaLoadErrors.set(mediaKey(householdId, item.coverMediaId), error);
+      if (selectedItemId === itemId) {
+        setFeedback('#itemDetailMessage', `封面载入失败：${error.message}`, 'error');
+        renderItemDetail();
+      }
     });
   }
 }
@@ -725,19 +1195,57 @@ function commitLocalItemMutation(nextLedger, nextItemsState, nextMedia) {
   if (selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
 }
 
+const MEDIA_STATUS_COPY = Object.freeze({
+  cover:Object.freeze({
+    idle:'选择图片后会在本机安全处理', selected:'已选择封面，正在准备预览', validating:'正在验证封面图片',
+    compressing:'正在压缩封面图片', ready:'封面图片已准备好', error:'封面图片处理失败'
+  }),
+  receipt:Object.freeze({
+    idle:'选择凭证后会在本机安全处理', selected:'已选择凭证，保存时处理', validating:'正在验证凭证图片',
+    compressing:'正在压缩凭证图片', ready:'凭证图片已准备好', error:'凭证图片处理失败'
+  })
+});
+const MEDIA_STATUS_TONES = Object.freeze({ idle:'neutral', selected:'neutral', validating:'neutral', compressing:'neutral', ready:'success', error:'error' });
+
+function setMediaStatus(target, kind, phase) {
+  const element = typeof target === 'string' ? $(target) : target;
+  const copy = MEDIA_STATUS_COPY[kind]?.[phase];
+  if (!element || !copy || !MEDIA_STATUS_TONES[phase]) throw new Error('媒体状态无效');
+  element.classList.add('media-status');
+  element.dataset.mediaPhase = phase;
+  element.dataset.tone = MEDIA_STATUS_TONES[phase];
+  element.textContent = copy;
+}
+
+function validateSelectedMediaFile(file) {
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file?.type)) throw new Error('请选择 JPG、PNG 或 WebP 图片');
+  if (!Number.isSafeInteger(file.size) || file.size <= 0) throw new Error('图片文件为空或无法读取');
+  if (file.size > 8 * 1024 * 1024) throw new Error('原图不能超过 8MB');
+}
+
 async function prepareFormMedia(input, kind, pending, slot, statusElement, renderPlan = null) {
   const file = input.files?.[0] ?? null;
   if (!file) return null;
   const renderKey = renderPlan ? JSON.stringify(renderPlan) : '';
-  if (pending[`${slot}File`] === file && pending[`${slot}RenderKey`] === renderKey && pending[slot]) return pending[slot];
-  statusElement.textContent = kind === 'cover' ? '正在压缩封面…' : '正在压缩凭证…';
-  const compressed = await compressItemMedia(file, kind, renderPlan ? { renderPlan } : {});
-  const media = { id:pending[`${slot}Id`], ...compressed };
-  pending[`${slot}File`] = file;
-  pending[`${slot}RenderKey`] = renderKey;
-  pending[slot] = media;
-  statusElement.textContent = `已压缩 · ${media.width} × ${media.height}`;
-  return media;
+  if (pending[`${slot}File`] === file && pending[`${slot}RenderKey`] === renderKey && pending[slot]) {
+    setMediaStatus(statusElement, kind, 'ready');
+    return pending[slot];
+  }
+  try {
+    setMediaStatus(statusElement, kind, 'validating');
+    validateSelectedMediaFile(file);
+    setMediaStatus(statusElement, kind, 'compressing');
+    const compressed = await compressItemMedia(file, kind, renderPlan ? { renderPlan } : {});
+    const media = { id:pending[`${slot}Id`], ...compressed };
+    pending[`${slot}File`] = file;
+    pending[`${slot}RenderKey`] = renderKey;
+    pending[slot] = media;
+    setMediaStatus(statusElement, kind, 'ready');
+    return media;
+  } catch (error) {
+    setMediaStatus(statusElement, kind, 'error');
+    throw error;
+  }
 }
 
 function clearPendingNewItemMedia(slot) {
@@ -804,7 +1312,7 @@ function setNewItemCoverEdit(partial) {
   const next = normaliseCoverEditState(newItemCoverEdit.sourceWidth, newItemCoverEdit.sourceHeight, { ...newItemCoverEdit, ...partial });
   newItemCoverEdit = { ...newItemCoverEdit, ...next };
   clearPendingNewItemMedia('cover');
-  $('#newItemCoverStatus').textContent = '将在保存时按当前预览压缩为 JPEG';
+  setMediaStatus('#newItemCoverStatus', 'cover', 'selected');
   renderNewItemCoverEditor();
 }
 
@@ -822,15 +1330,17 @@ function loadNewItemCoverPreview(file) {
   releaseNewItemCoverPreview();
   resetNewItemCoverEditor({ keepFile:true });
   if (!file) return;
+  setMediaStatus('#newItemCoverStatus', 'cover', 'validating');
   newItemCoverPreviewUrl = URL.createObjectURL(file);
   const image = $('#newItemCoverPreview');
   image.onload = () => {
     newItemCoverEdit = { ...newItemCoverEdit, sourceWidth:image.naturalWidth, sourceHeight:image.naturalHeight };
     $('#newItemCoverEditor').hidden = false;
     renderNewItemCoverEditor();
+    setMediaStatus('#newItemCoverStatus', 'cover', 'selected');
   };
   image.onerror = () => {
-    $('#newItemCoverStatus').textContent = '无法预览这张图片，请重新选择';
+    setMediaStatus('#newItemCoverStatus', 'cover', 'error');
     $('#newItemCoverEditor').hidden = true;
   };
   image.src = newItemCoverPreviewUrl;
@@ -841,8 +1351,8 @@ function resetNewItemMediaUI() {
   resetNewItemCoverEditor({ keepFile:true });
   updateNewItemUploadRow('cover');
   updateNewItemUploadRow('receipt');
-  $('#newItemCoverStatus').textContent = '选择后可保留完整图片或自定义 4:5 裁切';
-  $('#newItemReceiptStatus').textContent = '仅在保存订金时读取并压缩';
+  setMediaStatus('#newItemCoverStatus', 'cover', 'idle');
+  setMediaStatus('#newItemReceiptStatus', 'receipt', 'idle');
 }
 
 function updateNewItemDepositControls() {
@@ -853,7 +1363,7 @@ function updateNewItemDepositControls() {
 
 function openNewItem() {
   if (usesCloudStore() && !navigator.onLine) {
-    showToast('新增物品需要联网。');
+    showToast('新增物品需要联网。', 'warning');
     return;
   }
   pendingItemCreate = {
@@ -866,8 +1376,8 @@ function openNewItem() {
   populateAccounts();
   $('#newItemDepositDate').value = today();
   $('#newItemLinked').checked = true;
-  $('#newItemMessage').textContent = '';
-  $('#saveNewItemButton').disabled = false;
+  clearFeedback('#newItemMessage');
+  resetActionButton($('#saveNewItemButton'));
   updateNewItemDepositControls();
   showDialog($('#newItemDialog'), () => $('#newItemName').focus());
 }
@@ -878,7 +1388,7 @@ function openPaymentDialog(full = false) {
   const item = normaliseDisplayItem(itemById(selectedItemId));
   if (!item || item.status === 'archived' || item.balanceMinor <= 0) return;
   if (usesCloudStore() && !navigator.onLine) {
-    $('#itemDetailMessage').textContent = '记录付款需要联网。';
+    setFeedback('#itemDetailMessage', '记录付款需要联网。', 'warning', $('#payItemPartButton'));
     return;
   }
   pendingPayment = {
@@ -893,8 +1403,9 @@ function openPaymentDialog(full = false) {
   $('#paymentAmount').readOnly = full;
   $('#paymentDate').value = today();
   $('#paymentLinked').checked = true;
-  $('#paymentMessage').textContent = '';
-  $('#paymentReceiptStatus').textContent = '会压缩并独立保存';
+  clearFeedback('#paymentMessage');
+  resetActionButton($('#savePaymentButton'));
+  setMediaStatus('#paymentReceiptStatus', 'receipt', 'idle');
   updatePaymentAccountRow();
   showDialog($('#paymentDialog'), () => (full ? $('#paymentDate') : $('#paymentAmount')).focus());
 }
@@ -903,7 +1414,7 @@ function openEditItem() {
   const item = itemById(selectedItemId);
   if (!item || item.archivedAt || item.status === 'archived') return;
   if (usesCloudStore() && !navigator.onLine) {
-    $('#itemDetailMessage').textContent = '编辑物品需要联网。';
+    setFeedback('#itemDetailMessage', '编辑物品需要联网。', 'warning', $('#editItemButton'));
     return;
   }
   pendingItemEdit = { operationId:uid('item-edit'), coverId:uid('item-cover'), updatedAt:new Date().toISOString(), originalCoverMediaId:item.coverMediaId ?? null };
@@ -912,8 +1423,9 @@ function openEditItem() {
   $('#editItemFullPrice').value = senToAmount(item.fullPriceMinor);
   $('#editItemEtaDate').value = item.etaDate || '';
   $('#editItemNote').value = item.note || '';
-  $('#editItemMessage').textContent = '';
-  $('#editItemCoverStatus').textContent = '不选择会保留现有封面';
+  clearFeedback('#editItemMessage');
+  resetActionButton($('#saveEditItemButton'));
+  setMediaStatus('#editItemCoverStatus', 'cover', 'idle');
   showDialog($('#editItemDialog'));
 }
 
@@ -926,15 +1438,13 @@ async function runItemLifecycle(action, button) {
   const item = itemById(selectedItemId);
   if (!item) return;
   if (usesCloudStore() && !navigator.onLine) {
-    $('#itemDetailMessage').textContent = '此操作需要联网。';
+    setFeedback('#itemDetailMessage', '此操作需要联网。', 'warning', button);
     return;
   }
   const key = `${currentMediaHouseholdId()}:${action}:item:${item.id}`;
   const operationId = actionOperationId(key, `item-${action}`);
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '处理中…';
-  $('#itemDetailMessage').textContent = '';
+  setActionButtonState(button, 'pending', { label:'处理中…' });
+  clearFeedback('#itemDetailMessage');
   try {
     if (usesCloudStore()) {
       const result = await cloud[action === 'archive' ? 'archiveItem' : 'restoreItem']({
@@ -949,14 +1459,16 @@ async function runItemLifecycle(action, button) {
       commitLocalItemMutation(ledger, result.state, new Map(localItemMedia));
     }
     itemActionOperations.delete(key);
+    queueBalancedHandoff('item', item.id);
     renderItemsView();
     renderItemDetail();
-    showToast(action === 'archive' ? '物品已归档。' : '物品已恢复到收藏。');
+    setActionButtonState(button, 'success');
+    showToast(action === 'archive' ? '物品已归档。' : '物品已恢复到收藏。', 'success');
   } catch (error) {
-    $('#itemDetailMessage').textContent = error.message;
+    setActionButtonState(button, 'error');
+    setFeedback('#itemDetailMessage', error.message, 'error', button);
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 }
 
@@ -964,20 +1476,18 @@ async function deleteSelectedItem(button) {
   const item = itemById(selectedItemId);
   if (!item || item.deletedAt) return;
   if (item.archivedAt || item.status === 'archived') {
-    $('#itemDetailMessage').textContent = '请先恢复已归档物品，再删除。';
+    setFeedback('#itemDetailMessage', '请先恢复已归档物品，再删除。', 'warning', button);
     return;
   }
   if (usesCloudStore() && !navigator.onLine) {
-    $('#itemDetailMessage').textContent = '删除物品需要联网。';
+    setFeedback('#itemDetailMessage', '删除物品需要联网。', 'warning', button);
     return;
   }
   if (!confirm(`删除「${item.name}」？所有仍生效的物品付款会作废，关联账目会移入回收状态，不再计入支出。`)) return;
   const key = `${currentMediaHouseholdId()}:delete:item:${item.id}`;
   const groupOperationId = actionOperationId(key, 'item-delete-group');
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '撤销付款中…';
-  $('#itemDetailMessage').textContent = '';
+  setActionButtonState(button, 'pending', { label:'撤销付款中…' });
+  clearFeedback('#itemDetailMessage');
   try {
     if (usesCloudStore()) {
       let latestItem = item;
@@ -994,7 +1504,7 @@ async function deleteSelectedItem(button) {
         upsertItemRecord(result.item);
         upsertCurrentPayment(result.payment);
       }
-      button.textContent = '删除物品中…';
+      setActionButtonState(button, 'pending', { label:'删除物品中…' });
       const result = await cloud.deleteItem({
         householdId:currentHousehold.id, itemId:item.id,
         operationId:`${groupOperationId}:final`, expectedRevision:latestItem.revision, actorUid:cloudUser.uid
@@ -1019,15 +1529,16 @@ async function deleteSelectedItem(button) {
       commitLocalItemMutation(nextLedger, deleted.state, new Map(localItemMedia));
     }
     itemActionOperations.delete(key);
+    setActionButtonState(button, 'success');
     closeItemDetail(() => {
       render();
-      showToast('物品已移入回收站，相关付款不再计入账目。');
+      showToast('物品已移入回收站，相关付款不再计入账目。', 'success');
     });
   } catch (error) {
-    $('#itemDetailMessage').textContent = `${error.message}；若部分付款已撤销，请保持联网后再按一次删除继续。`;
+    setActionButtonState(button, 'error');
+    setFeedback('#itemDetailMessage', `${error.message}；若部分付款已撤销，请保持联网后再按一次删除继续。`, 'error', button);
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 }
 
@@ -1036,15 +1547,13 @@ async function correctItemPayment(action, paymentId, button) {
   const payment = currentItemPayments.find(candidate => candidate.id === paymentId);
   if (!item || !payment) return;
   if (usesCloudStore() && !navigator.onLine) {
-    $('#itemDetailMessage').textContent = '更正付款需要联网。';
+    setFeedback('#itemDetailMessage', '更正付款需要联网。', 'warning', button);
     return;
   }
   const key = `${currentMediaHouseholdId()}:${action}:payment:${paymentId}`;
   const operationId = actionOperationId(key, `payment-${action}`);
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '处理中…';
-  $('#itemDetailMessage').textContent = '';
+  setActionButtonState(button, 'pending', { label:'处理中…' });
+  clearFeedback('#itemDetailMessage');
   try {
     if (usesCloudStore()) {
       const result = await cloud[action === 'void' ? 'voidItemPayment' : 'restoreItemPayment']({
@@ -1061,14 +1570,17 @@ async function correctItemPayment(action, paymentId, button) {
       commitLocalItemMutation(nextLedger, result.state, new Map(localItemMedia));
     }
     itemActionOperations.delete(key);
+    queueBalancedHandoff('item', item.id);
+    queueBalancedHandoff('payment', paymentId);
     render();
     renderItemDetail();
-    showToast(action === 'void' ? '付款已作废，相关账目已同步更正。' : '付款与相关账目已恢复。');
+    setActionButtonState(button, 'success');
+    showToast(action === 'void' ? '付款已作废，相关账目已同步更正。' : '付款与相关账目已恢复。', 'success');
   } catch (error) {
-    $('#itemDetailMessage').textContent = error.message;
+    setActionButtonState(button, 'error');
+    setFeedback('#itemDetailMessage', error.message, 'error', button);
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 }
 
@@ -1086,11 +1598,11 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
       const amountClass = targetContext ? '' : 'expense';
       const amountText = targetContext ? `−欠款 ${formatRM(shownMinor)}` : `−${formatRM(shownMinor)}`;
       const desktopFlow = `${source?.name ?? '账外资金'} → ${target?.name ?? '负债账户'}${entry.note ? ` · ${entry.note}` : ''}`;
-      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">还</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>还款</b><small>${escapeHtml(target?.name ?? '负债账户')}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amountText}</span></button>`;
+      return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}" aria-label="查看还款 ${formatRM(entry.amountMinor)}"><span class="transaction-icon repayment">${transactionIconMarkup(entry)}</span><span class="transaction-main"><b>还款 · ${escapeHtml(target?.name ?? '负债账户')}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amountText}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>还款</b><small>${escapeHtml(target?.name ?? '负债账户')}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amountText}</span></button>`;
     }
     const isLinkedItemPayment = entry.sourceType === 'itemPayment';
     const linkedItem = isLinkedItemPayment ? itemById(entry.sourceItemId) : null;
-    const sign = entry.kind === 'expense' ? '−' : entry.kind === 'income' ? '＋' : '↔';
+
     let amountClass = entry.kind === 'expense' ? 'expense' : '';
     let amount = entry.kind === 'transfer' ? '转账' : `${entry.kind === 'expense' ? '−' : '＋'}${formatRM(entry.amountMinor)}`;
     if (entry.kind === 'transfer' && contextAccountId) {
@@ -1103,7 +1615,7 @@ function renderTransactionRows(entries, emptyTitle, emptyBody, contextAccountId 
     const route = isLinkedItemPayment ? ` data-linked-item-id="${escapeHtml(entry.sourceItemId)}" data-linked-payment-id="${escapeHtml(entry.sourcePaymentId)}"` : '';
     const aria = isLinkedItemPayment ? `查看物品付款 ${linkedItem?.name ?? ''}` : `编辑 ${typeLabel(entry.kind)} ${formatRM(entry.amountMinor)}`;
     const desktopFlow = `${accountFlowLabel(entry)} · ${entry.note || linkedItem?.name || '无备注'}`;
-    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${sign}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>${escapeHtml(title)}</b><small>${escapeHtml(typeLabel(entry.kind))}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amount}</span></button>`;
+    return `<button class="transaction-row" data-transaction-id="${escapeHtml(entry.id)}"${route} aria-label="${escapeHtml(aria)}"><span class="transaction-icon ${entry.kind}">${transactionIconMarkup(entry)}</span><span class="transaction-main"><b>${escapeHtml(title)}</b><small>${escapeHtml(metadata)}</small></span><span class="transaction-value ${amountClass}">${amount}</span><span class="desktop-entry-cell desktop-entry-date desktop-only">${escapeHtml(entry.occurredAt.slice(0, 10))}</span><span class="desktop-entry-cell desktop-entry-kind desktop-only"><b>${escapeHtml(title)}</b><small>${escapeHtml(typeLabel(entry.kind))}</small></span><span class="desktop-entry-cell desktop-entry-flow desktop-only">${escapeHtml(desktopFlow)}</span><span class="desktop-entry-cell desktop-entry-actor desktop-only">${escapeHtml(visibleActor(entry.actorUid))}</span><span class="desktop-entry-cell desktop-entry-amount desktop-only ${amountClass}">${amount}</span></button>`;
   }).join('');
 }
 
@@ -1188,14 +1700,14 @@ function renderUpcomingActions() {
     const subtype = accountSubtype(account);
     if (subtype === 'credit_card' && account.balanceMinor > 0 && account.dueDay) {
       const dueDate = nextMonthlyDate(account.dueDay);
-      actions.push({ type:'account', id:account.id, sortDate:dueDate, icon:'卡', iconClass:'repayment', title:`${account.name} 还款日`, detail:`当前欠款 ${formatRM(account.balanceMinor)}`, value:describeEtaDate(dueDate, today()).replace(/^预计/, '') });
+      actions.push({ type:'account', id:account.id, sortDate:dueDate, iconFamily:'credit', iconState:'idle', iconClass:'repayment', title:`${account.name} 还款日`, detail:`当前欠款 ${formatRM(account.balanceMinor)}`, value:describeEtaDate(dueDate, today()).replace(/^预计/, '') });
     } else if (subtype === 'loan' && account.balanceMinor > 0 && account.scheduledPaymentMinor) {
-      actions.push({ type:'account', id:account.id, sortDate:account.expectedPayoffDate || '9999-12-31', icon:'贷', iconClass:'repayment', title:`${account.name} 每期还款`, detail:`剩余本金 ${formatRM(account.balanceMinor)}`, value:formatRM(account.scheduledPaymentMinor), meta:account.expectedPayoffDate ? `预计 ${account.expectedPayoffDate} 还清` : '按计划还款' });
+      actions.push({ type:'account', id:account.id, sortDate:account.expectedPayoffDate || '9999-12-31', iconFamily:'loan', iconState:'scheduled', iconClass:'repayment', title:`${account.name} 每期还款`, detail:`剩余本金 ${formatRM(account.balanceMinor)}`, value:formatRM(account.scheduledPaymentMinor), meta:account.expectedPayoffDate ? `预计 ${account.expectedPayoffDate} 还清` : '按计划还款' });
     }
   }
   for (const item of itemRecords) {
     if (item.deletedAt || !item.etaDate || item.archivedAt || item.status === 'archived') continue;
-    actions.push({ type:'item', id:item.id, sortDate:item.etaDate, icon:'物', iconClass:'eta', title:`${item.name} 预计到货`, detail:item.balanceMinor > 0 ? `待付 ${formatRM(item.balanceMinor)}` : '已付清', value:describeEtaDate(item.etaDate, today()) });
+    actions.push({ type:'item', id:item.id, sortDate:item.etaDate, iconFamily:'package', iconState:item.balanceMinor > 0 ? 'pending' : 'complete', iconClass:'eta', title:`${item.name} 预计到货`, detail:item.balanceMinor > 0 ? `待付 ${formatRM(item.balanceMinor)}` : '已付清', value:describeEtaDate(item.etaDate, today()) });
   }
   actions.sort((a, b) => a.sortDate.localeCompare(b.sortDate) || a.title.localeCompare(b.title, 'zh-CN'));
   const visible = actions.slice(0, 5);
@@ -1204,7 +1716,7 @@ function renderUpcomingActions() {
     list.innerHTML = '<div class="empty-state upcoming-empty-state"><b>近期没有待处理事项</b><p>信用卡还款、贷款计划和物品预计到货会显示在这里。</p></div>';
     return;
   }
-  list.innerHTML = visible.map(action => `<button class="upcoming-action-row" type="button" data-upcoming-type="${action.type}" data-upcoming-id="${escapeHtml(action.id)}"><span class="upcoming-action-icon ${action.iconClass}" aria-hidden="true">${action.icon}</span><span class="upcoming-action-main"><b>${escapeHtml(action.title)}</b><small>${escapeHtml(action.detail)}</small></span><span class="upcoming-action-value">${escapeHtml(action.value)}${action.meta ? `<small>${escapeHtml(action.meta)}</small>` : ''}</span></button>`).join('');
+  list.innerHTML = visible.map(action => `<button class="upcoming-action-row" type="button" data-upcoming-type="${action.type}" data-upcoming-id="${escapeHtml(action.id)}"><span class="upcoming-action-icon ${action.iconClass}">${stateIconMarkup(action.iconFamily, action.iconState)}</span><span class="upcoming-action-main"><b>${escapeHtml(action.title)}</b><small>${escapeHtml(action.detail)}</small></span><span class="upcoming-action-value">${escapeHtml(action.value)}${action.meta ? `<small>${escapeHtml(action.meta)}</small>` : ''}</span></button>`).join('');
   list.querySelectorAll('[data-upcoming-type]').forEach(button => button.addEventListener('click', () => {
     if (button.dataset.upcomingType === 'item') openItemDetail(button.dataset.upcomingId);
     else openAccountDetail(button.dataset.upcomingId);
@@ -1235,7 +1747,8 @@ function accountRowMarkup(account) {
     ? '<span class="account-total-status">计入家庭净额</span>'
     : '<span class="account-total-status excluded">不计入总额</span>';
   const type = subtype === 'loan' ? loanTypeLabel(account) : accountSubtypeLabel(account);
-  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${escapeHtml(type)} ${totalStatus}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="row-chevron">${chevronIcon}</span><span class="desktop-account-cell desktop-account-name desktop-only"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><b>${escapeHtml(account.name)}</b></span><span class="desktop-account-cell desktop-account-type desktop-only">${escapeHtml(type)}</span><span class="desktop-account-cell desktop-account-balance desktop-only"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="desktop-account-cell desktop-account-included desktop-only">${totalStatus}</span><span class="desktop-account-cell desktop-account-open desktop-only">${chevronIcon}</span></button>`;
+  const chevron = staticIconMarkup('chevron-right');
+  return `<button class="account-row ${debt ? 'liability' : ''} ${subtypeClass} ${account.includeInTotal ? '' : 'excluded'}" data-account-id="${escapeHtml(account.id)}" data-account-subtype="${subtype}" aria-label="查看 ${escapeHtml(account.name)} 明细"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><span class="account-main"><b>${escapeHtml(account.name)}</b><small>${escapeHtml(type)} ${totalStatus}</small></span><span class="account-value"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="row-chevron">${chevron}</span><span class="desktop-account-cell desktop-account-name desktop-only"><span class="account-mark ${debt ? 'liability' : ''}">${accountAvatarMarkup(account)}</span><b>${escapeHtml(account.name)}</b></span><span class="desktop-account-cell desktop-account-type desktop-only">${escapeHtml(type)}</span><span class="desktop-account-cell desktop-account-balance desktop-only"><b>${formatRM(account.balanceMinor)}</b><small>${accountBalanceMeaning(account)}</small></span><span class="desktop-account-cell desktop-account-included desktop-only">${totalStatus}</span><span class="desktop-account-cell desktop-account-open desktop-only">${chevron}</span></button>`;
 }
 
 function renderAccountGroups(accounts) {
@@ -1336,10 +1849,10 @@ function renderRepaymentBreakdown() {
     $('#repaymentInterestPreview').textContent = formatRM(breakdown.interestMinor);
     $('#repaymentInterestPreviewRow').hidden = breakdown.interestMinor === 0 && loanCalculationMode(account) !== 'reducing_balance';
     $('#repaymentBreakdown').hidden = false;
-    $('#repaymentMessage').textContent = '';
+    clearFeedback('#repaymentMessage');
   } catch (error) {
     $('#repaymentBreakdown').hidden = true;
-    $('#repaymentMessage').textContent = error.message;
+    setFeedback('#repaymentMessage', error.message, 'error', $('#repaymentAmount'));
   }
 }
 
@@ -1348,7 +1861,7 @@ function openRepayment(accountId, transactionId = null, returnAccountId = null) 
   const entry = transactionId ? ledger.transactions.find(candidate => candidate.id === transactionId && !candidate.deletedAt) : null;
   if (!account || account.kind !== 'liability') return;
   if (!navigator.onLine) {
-    showToast('记录还款需要联网。');
+    showToast('记录还款需要联网。', 'warning');
     return;
   }
   const reviewing = Boolean(entry);
@@ -1383,7 +1896,8 @@ function openRepayment(accountId, transactionId = null, returnAccountId = null) 
   accountPicker.sync('repayment');
   $('#repaymentDate').value = entry?.occurredAt?.slice(0, 10) ?? today();
   $('#repaymentNote').value = entry?.note ?? '';
-  $('#repaymentMessage').textContent = '';
+  clearFeedback('#repaymentMessage');
+  resetActionButton($('#saveRepaymentButton'));
   $('#repaymentFullButton').hidden = reviewing;
   $('#saveRepaymentButton').hidden = reviewing;
   const archive = $('#archiveRepaymentButton');
@@ -1412,12 +1926,21 @@ function ensureRepaymentArchiveButton() {
   button.addEventListener('click', async () => {
     if (!pendingRepayment?.transactionId || !navigator.onLine) return;
     const operationId = uid('repayment-recycle');
+    const transactionId = pendingRepayment.transactionId;
+    setActionButtonState(button, 'pending', { label:'处理中…' });
     try {
-      const result = moveToRecycleBin(ledger, pendingRepayment.transactionId, operationId);
-      await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, pendingRepayment.transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', pendingRepayment.transactionId, operationId));
+      const result = moveToRecycleBin(ledger, transactionId, operationId);
+      await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', transactionId, operationId));
+      queueBalancedHandoff('transaction', transactionId);
+      setActionButtonState(button, 'success');
       closeRepayment({ returnToDetail:true });
-      showToast('还款已移入回收站。');
-    } catch (error) { $('#repaymentMessage').textContent = error.message; }
+      showToast('还款已移入回收站。', 'success');
+    } catch (error) {
+      setActionButtonState(button, 'error');
+      setFeedback('#repaymentMessage', error.message, 'error', $('#repaymentAmount'));
+    } finally {
+      releaseActionButton(button);
+    }
   });
 }
 
@@ -1465,6 +1988,7 @@ function renderEntryResults() {
   const entries = filteredEntries();
   $('#entryFilterSummary').textContent = activeFilterSummary(entryFilters, accountById(entryFilters.accountId)?.name || '', entries.length);
   $('#clearEntryFilters').hidden = !hasActiveEntryFilters();
+  setStateIcon($('#openEntryFilters'), hasActiveEntryFilters() ? 'active' : 'idle');
   $('#entrySearchInput').value = entryFilters.keyword;
   $('#allMonthsToggle').checked = entryFilters.allMonths;
   $('#transactionList').innerHTML = renderTransactionRows(entries,
@@ -1492,8 +2016,8 @@ function renderOnboarding() {
   if (hidden) return;
   const next = state.steps.find(step => !step.complete);
   $('#gettingStartedList').innerHTML = `<div class="getting-started-steps">${state.steps.map(step =>
-    `<span class="getting-started-step ${step.complete ? 'complete' : ''}"><i aria-hidden="true">${step.complete ? '✓' : '○'}</i>${escapeHtml(step.label)}</span>`
-  ).join('')}</div>${next ? `<button class="primary-button compact-onboarding-cta" type="button" data-onboarding-action="${next.action}">${escapeHtml(next.label)}</button>` : ''}`;
+    `<span class="getting-started-step ${step.complete ? 'complete' : ''}"><i>${stateIconMarkup('onboarding', step.complete ? 'complete' : 'incomplete')}</i>${escapeHtml(step.label)}</span>`
+  ).join('')}</div>${next ? `<button class="primary-button compact-onboarding-cta icon-label-button" type="button" data-onboarding-action="${next.action}">${stateIconMarkup('onboarding', next.action === 'account' ? 'wallet' : next.action === 'entry' ? 'entry' : 'member')}<span>${escapeHtml(next.label)}</span></button>` : ''}`;
   panel.querySelector('[data-onboarding-action]')?.addEventListener('click', event => {
     const action = event.currentTarget.dataset.onboardingAction;
     if (action === 'account') openAccount();
@@ -1511,7 +2035,7 @@ function memberDisplayMarkup(member) {
 function renderMembers() {
   const list = $('#memberList');
   if (!usesCloudStore()) {
-    list.innerHTML = '<div class="member-row"><span class="member-main"><b>你</b><small>本机账本</small></span><span class="member-status">本机</span></div>';
+    list.innerHTML = `<div class="member-row"><span class="member-main"><b>你</b><small>本机账本</small></span><span class="member-status">${stateIconMarkup('member', 'active')}<span>本机</span></span></div>`;
     $('#refreshMembersButton').hidden = true;
     return;
   }
@@ -1527,43 +2051,52 @@ function renderMembers() {
     const manageable = owner && member.role === 'member' && member.uid !== cloudUser?.uid;
     const action = manageable
       ? `<button class="minor-button member-action" type="button" data-member-id="${escapeHtml(member.uid)}" data-member-active="${member.active === false}">${member.active === false ? '启用' : '停用'}</button>` : '';
-    return `<div class="member-row" data-member-status="${status}">${memberDisplayMarkup(member)}<span class="member-status">${label}</span>${action}</div>`;
+    return `<div class="member-row" data-member-status="${status}">${memberDisplayMarkup(member)}<span class="member-status">${stateIconMarkup('member', status)}<span>${label}</span></span>${action}</div>`;
   });
   for (const invite of householdPendingInvites) {
     const action = owner ? `<button class="minor-button member-action delete" type="button" data-cancel-invite="${escapeHtml(invite.email)}">取消邀请</button>` : '';
-    rows.push(`<div class="member-row" data-member-status="pending"><span class="member-main"><b>${escapeHtml(invite.email)}</b><small>等待对方接受</small></span><span class="member-status">待加入</span>${action}</div>`);
+    rows.push(`<div class="member-row" data-member-status="pending"><span class="member-main"><b>${escapeHtml(invite.email)}</b><small>等待对方接受</small></span><span class="member-status">${stateIconMarkup('member', 'pending')}<span>待加入</span></span>${action}</div>`);
   }
-  list.innerHTML = rows.join('') || '<div class="empty-state"><b>尚无成员资料</b><p>重新载入后仍为空，请检查网络连接。</p></div>';
+  if (!memberReadState.membersKnown) rows.push(`<div class="member-read-state" role="status">${stateIconMarkup('member', 'loading')}<span>${householdMembers.length ? '正在更新成员，暂时显示上次资料。' : '正在载入成员资料…'}</span></div>`);
+  if (owner && !memberReadState.invitesKnown) rows.push(`<div class="member-read-state" role="status">${stateIconMarkup('member', 'loading')}<span>${householdPendingInvites.length ? '正在更新待处理邀请。' : '正在载入待处理邀请…'}</span></div>`);
+  if (memberReadState.membersError) rows.push(`<div class="member-read-state error" role="status">成员载入失败：${escapeHtml(memberReadState.membersError)}</div>`);
+  if (memberReadState.invitesError) rows.push(`<div class="member-read-state error" role="status">邀请载入失败：${escapeHtml(memberReadState.invitesError)}</div>`);
+  const readsKnown = memberReadState.membersKnown && (!owner || memberReadState.invitesKnown);
+  list.innerHTML = rows.join('') || (readsKnown
+    ? '<div class="empty-state"><b>尚无成员资料</b><p>这个账本目前没有成员或待处理邀请。</p></div>'
+    : `<div class="member-read-state" role="status">${stateIconMarkup('member', 'loading')}<span>正在载入成员与邀请…</span></div>`);
   list.querySelectorAll('[data-member-id]').forEach(button => button.addEventListener('click', async () => {
     const member = householdMembers.find(candidate => candidate.uid === button.dataset.memberId);
     const active = button.dataset.memberActive === 'true';
     if (!member || !confirm(`${active ? '启用' : '停用'}「${member.displayName || member.email || '这位成员'}」？`)) return;
-    button.disabled = true;
-    button.setAttribute('aria-busy', 'true');
+    setActionButtonState(button, 'pending', { label:'处理中…' });
     try {
       const readback = await cloud.setMemberActive({ householdId:currentHousehold.id, memberId:member.uid, active });
       householdMembers = householdMembers.map(candidate => candidate.uid === readback.uid ? readback : candidate);
+      setActionButtonState(button, 'success');
       renderMembers(); renderOnboarding();
-      showToast(active ? '成员已启用。' : '成员已停用。');
+      showToast(active ? '成员已启用。' : '成员已停用。', 'success');
     } catch (error) {
-      $('#settingsMessage').textContent = `成员状态更新失败：${error.message}`;
-      button.disabled = false;
-      button.removeAttribute('aria-busy');
+      setActionButtonState(button, 'error');
+      setFeedback('#settingsMessage', `成员状态更新失败：${error.message}`, 'error', button);
+    } finally {
+      releaseActionButton(button);
     }
   }));
   list.querySelectorAll('[data-cancel-invite]').forEach(button => button.addEventListener('click', async () => {
     const email = button.dataset.cancelInvite;
     if (!confirm(`取消发送给 ${email} 的邀请？`)) return;
-    button.disabled = true;
-    button.setAttribute('aria-busy', 'true');
+    setActionButtonState(button, 'pending', { label:'处理中…' });
     try {
       householdPendingInvites = await cloud.cancelInvite({ householdId:currentHousehold.id, inviteEmail:email });
+      setActionButtonState(button, 'success');
       renderMembers(); renderOnboarding();
-      showToast('邀请已取消。');
+      showToast('邀请已取消。', 'success');
     } catch (error) {
-      $('#settingsMessage').textContent = `取消邀请失败：${error.message}`;
-      button.disabled = false;
-      button.removeAttribute('aria-busy');
+      setActionButtonState(button, 'error');
+      setFeedback('#settingsMessage', `取消邀请失败：${error.message}`, 'error', button);
+    } finally {
+      releaseActionButton(button);
     }
   }));
 }
@@ -1571,29 +2104,68 @@ function renderMembers() {
 function restartMembersListener(householdId) {
   stopMembersWatch?.();
   stopMembersWatch = null;
-  householdMembers = [];
-  householdPendingInvites = [];
   const generation = ++memberReadGeneration;
+  const sameScope = memberReadState.householdId === householdId;
+  if (!sameScope) {
+    householdMembers = [];
+    householdPendingInvites = [];
+  }
+  const owner = isCurrentOwner();
+  memberReadState = {
+    householdId, generation, membersKnown:false, invitesKnown:!owner,
+    membersError:null, invitesError:null
+  };
   renderMembers();
-  if (!usesCloudStore() || !householdId) return;
+  if (!usesCloudStore() || !householdId) {
+    memberReadState = { householdId:'local', generation, membersKnown:true, invitesKnown:true, membersError:null, invitesError:null };
+    renderMembers();
+    return Promise.resolve({ ok:true });
+  }
+  let settleMembers;
+  let membersSettled = false;
+  const membersReady = new Promise(resolve => { settleMembers = resolve; });
   stopMembersWatch = cloud.subscribeMembers(householdId, members => {
     if (generation !== memberReadGeneration || householdId !== desiredHouseholdId) return;
     householdMembers = members;
+    memberReadState = { ...memberReadState, membersKnown:true, membersError:null };
+    if (!membersSettled) {
+      membersSettled = true;
+      settleMembers({ ok:true });
+    }
     renderMembers(); renderOnboarding(); render();
   }, error => {
-    if (generation === memberReadGeneration) $('#memberList').innerHTML = `<div class="error-state">成员载入失败：${escapeHtml(error.message)}</div>`;
+    if (generation !== memberReadGeneration || householdId !== desiredHouseholdId) return;
+    memberReadState = { ...memberReadState, membersError:error.message };
+    if (!membersSettled) {
+      membersSettled = true;
+      settleMembers({ ok:false, error });
+    }
+    renderMembers();
   });
-  if (!isCurrentOwner()) {
+  let invitesReady;
+  if (!owner) {
     householdPendingInvites = [];
     renderMembers(); renderOnboarding();
-    return;
+    invitesReady = Promise.resolve({ ok:true });
+  } else {
+    invitesReady = cloud.loadPendingInvites(householdId).then(invites => {
+      if (generation !== memberReadGeneration || householdId !== desiredHouseholdId) return { ok:true };
+      householdPendingInvites = invites;
+      memberReadState = { ...memberReadState, invitesKnown:true, invitesError:null };
+      renderMembers(); renderOnboarding();
+      return { ok:true };
+    }).catch(error => {
+      if (generation === memberReadGeneration && householdId === desiredHouseholdId) {
+        memberReadState = { ...memberReadState, invitesError:error.message };
+        setFeedback('#settingsMessage', `邀请载入失败：${error.message}`, 'error', $('#refreshMembersButton'));
+        renderMembers();
+      }
+      return { ok:false, error };
+    });
   }
-  cloud.loadPendingInvites(householdId).then(invites => {
-    if (generation !== memberReadGeneration || householdId !== desiredHouseholdId) return;
-    householdPendingInvites = invites;
-    renderMembers(); renderOnboarding();
-  }).catch(error => {
-    if (generation === memberReadGeneration) $('#settingsMessage').textContent = `邀请载入失败：${error.message}`;
+  return Promise.all([membersReady, invitesReady]).then(results => {
+    const failure = results.find(result => result?.ok === false);
+    return failure || { ok:true };
   });
 }
 
@@ -1617,7 +2189,8 @@ function render() {
   $('#monthPicker').value = selectedMonth;
 
   const status = $('#reconcileStatus');
-  status.textContent = check.ok ? '余额已核对' : `发现 ${check.mismatches.length} 项差异`;
+  status.querySelector('span').textContent = check.ok ? '余额已核对' : `发现 ${check.mismatches.length} 项差异`;
+  setStateIcon(status, check.ok ? 'balanced' : 'mismatch');
   status.classList.toggle('bad', !check.ok);
 
   const accounts = activeAccounts();
@@ -1634,6 +2207,7 @@ function render() {
   bindRenderedControls();
   if (selectedAccountDetailId && $('#accountDetailDialog').open) renderAccountDetail();
   document.querySelectorAll('[data-new-account]').forEach(button => button.addEventListener('click', () => openAccount()));
+  applyBalancedHandoffs();
 }
 
 function accountOptionDetails(account) {
@@ -1678,7 +2252,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
   const optionMarkup = (account, selectedId) => {
     const details = accountOptionDetails(account);
     const selected = account.id === selectedId;
-    return `<button class="account-picker-option" type="button" role="option" aria-selected="${selected}" tabindex="${selected ? '0' : '-1'}" data-account-picker-id="${escapeHtml(account.id)}"><span class="account-picker-name">${escapeHtml(account.name)}</span><span class="account-picker-type">${escapeHtml(details.type)}</span><span class="account-picker-amount">${escapeHtml(details.balance)}</span><span class="account-picker-check" aria-hidden="true">${selected ? '✓' : ''}</span></button>`;
+    return `<button class="account-picker-option" type="button" role="option" aria-selected="${selected}" tabindex="${selected ? '0' : '-1'}" data-account-picker-id="${escapeHtml(account.id)}"><span class="account-picker-name">${escapeHtml(account.name)}</span><span class="account-picker-type">${escapeHtml(details.type)}</span><span class="account-picker-amount">${escapeHtml(details.balance)}</span><span class="account-picker-check">${stateIconMarkup('completion', selected ? 'complete' : 'incomplete')}</span></button>`;
   };
 
   const renderOptions = () => {
@@ -1696,6 +2270,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     control.type.textContent = details.type;
     control.amount.textContent = details.balance;
     control.trigger.disabled = control.select.disabled || !selected;
+    setStateIcon(control.trigger, activeKey === key ? 'up' : 'down');
     if (activeKey === key) renderOptions();
   };
 
@@ -1713,6 +2288,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     const finishClose = () => {
       resetDrag();
       control?.trigger.setAttribute('aria-expanded', 'false');
+      setStateIcon(control?.trigger, 'down');
       activeKey = null;
       if (returnFocus) control?.trigger.focus();
     };
@@ -1736,6 +2312,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     sync(key);
     title.textContent = control.title;
     control.trigger.setAttribute('aria-expanded', 'true');
+    setStateIcon(control.trigger, 'up');
     showDialog(dialog, () => {
       const optionButtons = [...list.querySelectorAll('[role="option"]')];
       const selectedIndex = optionButtons.findIndex(option => option.getAttribute('aria-selected') === 'true');
@@ -1761,7 +2338,7 @@ function createAccountPicker({ dialogId, titleId, listId, closeId, backdropId, p
     control.select.value = accountId;
     sync(activeKey);
     control.select.dispatchEvent(new Event('change', { bubbles:true }));
-    close();
+    close(true);
   };
 
   for (const control of Object.values(controls)) {
@@ -1879,6 +2456,7 @@ function selectCategory(value = '', focusCustom = false) {
     const selected = button.dataset.category === selectedCategory;
     button.classList.toggle('selected', selected);
     button.setAttribute('aria-checked', String(selected));
+    setStateIcon(button, selected ? 'selected' : 'idle');
   });
   const customField = $('#customCategoryField');
   customField.hidden = selectedCategory !== '其它';
@@ -1923,8 +2501,7 @@ function applyEntryBusinessFields(values, feedback) {
   selectCategory(values.kind === 'transfer' ? '' : values.category || '');
   $('#noteInput').value = values.note || '';
   $('#dateInput').value = today();
-  $('#entryMessage').textContent = feedback;
-  $('#entryMessage').classList.add('success');
+  setFeedback('#entryMessage', feedback, 'success');
   $('#amountInput').focus();
   $('#amountInput').select();
 }
@@ -1937,7 +2514,7 @@ function renderEntryTemplates() {
   const scope = currentScope();
   const templates = loadEntryTemplates(localStorage, scope.userId, scope.householdId, kind);
   list.innerHTML = templates.length ? templates.map(template =>
-    `<div class="entry-template-row"><button class="entry-template-apply" type="button" data-template-id="${escapeHtml(template.id)}"><b>${escapeHtml(template.name)}</b><small>${escapeHtml(typeLabel(template.kind))} · ${formatRM(template.amountMinor)}</small></button><button class="entry-template-delete" type="button" data-delete-template="${escapeHtml(template.id)}" aria-label="删除 ${escapeHtml(template.name)}">×</button></div>`
+    `<div class="entry-template-row"><button class="entry-template-apply" type="button" data-template-id="${escapeHtml(template.id)}">${stateIconMarkup('template', 'copy')}<span><b>${escapeHtml(template.name)}</b><small>${escapeHtml(typeLabel(template.kind))} · ${formatRM(template.amountMinor)}</small></span></button><button class="entry-template-delete" type="button" data-delete-template="${escapeHtml(template.id)}" aria-label="删除 ${escapeHtml(template.name)}">${staticIconMarkup('trash')}</button></div>`
   ).join('') : `<p class="entry-template-empty">还没有${escapeHtml(kindLabel)}常用模板。可先填写表单，再存为常用。</p>`;
   list.querySelectorAll('[data-template-id]').forEach(button => button.addEventListener('click', () => {
     const template = templates.find(candidate => candidate.id === button.dataset.templateId);
@@ -1946,7 +2523,7 @@ function renderEntryTemplates() {
   list.querySelectorAll('[data-delete-template]').forEach(button => button.addEventListener('click', () => {
     deleteEntryTemplate(localStorage, scope.userId, scope.householdId, button.dataset.deleteTemplate);
     renderEntryTemplates();
-    $('#entryShortcutMessage').textContent = '常用账目已删除。';
+    setFeedback('#entryShortcutMessage', '常用账目已删除。', 'success');
   }));
 }
 
@@ -1965,13 +2542,13 @@ function currentEntryTemplate() {
 function openEntry(id = null) {
   const entryId = typeof id === 'string' ? id : null;
   if (!activeAccounts().length) {
-    showToast('请先新增一个可用账户。');
+    showToast('请先新增一个可用账户。', 'warning');
     openAccount();
     return;
   }
   const entry = entryId ? ledger.transactions.find(item => item.id === entryId && !item.deletedAt) : null;
   if (entryId && !entry) {
-    showToast('该账目已不在可编辑列表。');
+    showToast('该账目已不在可编辑列表。', 'warning');
     return;
   }
   if (entry?.sourceType === 'itemPayment') {
@@ -1986,13 +2563,11 @@ function openEntry(id = null) {
   pendingOperationId = uid(entry ? 'edit' : 'op');
   saveLocked = false;
   accountPicker.close();
-  $('#saveEntryButton').disabled = false;
-  $('#entryMessage').textContent = '';
-  $('#entryMessage').classList.remove('success');
+  clearFeedback('#entryMessage');
   $('#entryForm').reset();
   $('#editingTransactionId').value = entry?.id || '';
   $('#entryDialogTitle').textContent = entry ? '编辑账目' : '新增账目';
-  $('#saveEntryButton').textContent = entry ? '保存修改' : '保存账目';
+  resetActionButton($('#saveEntryButton'), entry ? '保存修改' : '保存账目');
   $('#archiveTransactionButton').hidden = !entry;
   $('#openEntryShortcuts').hidden = Boolean(entry);
 
@@ -2023,7 +2598,7 @@ function renderAccountPhotoPreview() {
   const preview = $('#accountPhotoPreview');
   preview.innerHTML = pendingAccountPhotoDataUrl
     ? `<img src="${escapeHtml(pendingAccountPhotoDataUrl)}" alt="账户照片预览">`
-    : walletIcon;
+    : stateIconMarkup('account', document.querySelector('input[name="accountSubtype"]:checked')?.value === 'credit_card' ? 'credit' : document.querySelector('input[name="accountSubtype"]:checked')?.value === 'loan' ? 'loan' : 'idle');
   preview.classList.toggle('has-photo', Boolean(pendingAccountPhotoDataUrl));
   $('#removeAccountPhotoButton').hidden = !pendingAccountPhotoDataUrl;
 }
@@ -2113,6 +2688,7 @@ function updateAccountSubtypeFields() {
   $('#loanFields').hidden = subtype !== 'loan';
   $('#openingBalanceLabel').textContent = subtype === 'asset' ? '当前余额（RM）' : subtype === 'loan' && $('#loanCalculationMode').value === 'fixed_instalment' ? '目前剩余应付总额（RM）' : '当前欠款（RM）';
   if (subtype === 'loan') updateLoanFields();
+  if (!pendingAccountPhotoDataUrl) renderAccountPhotoPreview();
 }
 
 function openAccount(id = null) {
@@ -2120,7 +2696,8 @@ function openAccount(id = null) {
   const subtype = account ? accountSubtype(account) : 'asset';
   pendingAccountOperationId = uid(account ? 'account-edit' : 'account-create');
   $('#accountForm').reset();
-  $('#accountMessage').textContent = '';
+  clearFeedback('#accountMessage');
+  resetActionButton($('#saveAccountButton'));
   $('#accountPhotoInput').value = '';
   $('#editingAccountId').value = account?.id || '';
   $('#accountDialogTitle').textContent = account ? '编辑账户' : '新增账户';
@@ -2151,14 +2728,12 @@ async function restoreDeletedItemFromRecycle(itemId, button) {
   const item = itemById(itemId);
   if (!item?.deletedAt) return;
   if (usesCloudStore() && !navigator.onLine) {
-    showToast('恢复物品需要联网。');
+    showToast('恢复物品需要联网。', 'warning');
     return;
   }
   const key = `${currentMediaHouseholdId()}:restore-deleted:item:${item.id}`;
   const operationId = actionOperationId(key, 'item-restore-deleted');
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '恢复中…';
+  setActionButtonState(button, 'pending', { label:'恢复中…' });
   try {
     if (usesCloudStore()) {
       const result = await cloud.restoreDeletedItem({
@@ -2173,14 +2748,16 @@ async function restoreDeletedItemFromRecycle(itemId, button) {
       commitLocalItemMutation(ledger, result.state, new Map(localItemMedia));
     }
     itemActionOperations.delete(key);
+    queueBalancedHandoff('item', item.id);
     render();
     renderRecycle();
-    showToast('物品已恢复；原付款仍保持作废，可在物品详情逐笔恢复。');
+    setActionButtonState(button, 'success');
+    showToast('物品已恢复；原付款仍保持作废，可在物品详情逐笔恢复。', 'success');
   } catch (error) {
-    showToast(`无法恢复物品：${error.message}`);
+    setActionButtonState(button, 'error');
+    showToast(`无法恢复物品：${error.message}`, 'error');
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 }
 
@@ -2191,8 +2768,8 @@ function renderRecycle() {
   const deletedEntries = ledger.transactions
     .filter(entry => entry.deletedAt && entry.sourceType !== 'itemPayment')
     .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
-  const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">物</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · ${escapeHtml(visibleActor(item.deletedByUid ?? item.deletedBy))} · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button" data-restore-deleted-item="${escapeHtml(item.id)}">恢复物品</button></div></div></div>`).join('');
-  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">−</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(visibleActor(entry.actorUid))} · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button" data-restore="${escapeHtml(entry.id)}">恢复</button><button class="minor-button delete" data-delete="${escapeHtml(entry.id)}">永久删除</button></div></div></div>`).join('');
+  const itemMarkup = deletedItems.map(item => `<div class="recycle-row item-recycle-row"><span class="transaction-icon">${stateIconMarkup('recycle', 'idle')}</span><div class="transaction-main"><b>物品 · ${escapeHtml(item.name)}</b><small>${dateLabel(item.deletedAt)} 移入 · ${escapeHtml(visibleActor(item.deletedByUid ?? item.deletedBy))} · 关联付款已作废，不计入支出</small><div class="recycle-actions"><button class="minor-button icon-label-button" data-restore-deleted-item="${escapeHtml(item.id)}">${stateIconMarkup('recycle', 'restore')}<span>恢复物品</span></button></div></div></div>`).join('');
+  const entryMarkup = deletedEntries.map(entry => `<div class="recycle-row"><span class="transaction-icon expense">${transactionIconMarkup(entry)}</span><div class="transaction-main"><b>${escapeHtml(entry.category || typeLabel(entry.kind))} · ${formatRM(entry.amountMinor)}</b><small>${dateLabel(entry.deletedAt)} 移入 · ${escapeHtml(visibleActor(entry.actorUid))} · ${escapeHtml(entry.note || '无备注')}</small><div class="recycle-actions"><button class="minor-button icon-label-button" data-restore="${escapeHtml(entry.id)}">${stateIconMarkup('recycle', 'restore')}<span>恢复</span></button><button class="minor-button delete icon-label-button" data-delete="${escapeHtml(entry.id)}">${staticIconMarkup('trash')}<span>永久删除</span></button></div></div></div>`).join('');
   $('#recycleList').innerHTML = itemMarkup || entryMarkup
     ? `${itemMarkup}${entryMarkup}`
     : '<div class="empty-state"><b>回收站是空的</b><p>移除的普通账目和物品会显示在这里。</p></div>';
@@ -2202,20 +2779,41 @@ function renderRecycle() {
   }));
   document.querySelectorAll('[data-restore]').forEach(button => button.addEventListener('click', async () => {
     const operationId = uid('restore');
-    const result = restoreFromRecycleBin(ledger, button.dataset.restore, operationId);
-    await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, button.dataset.restore), pendingLedgerPatch(result.ledger, 'transactionPatch', button.dataset.restore, operationId));
-    renderRecycle();
-    showToast(result.duplicate ? '重复恢复已阻止。' : '已恢复账目并重新核对余额。');
+    const transactionId = button.dataset.restore;
+    const result = restoreFromRecycleBin(ledger, transactionId, operationId);
+    setActionButtonState(button, 'pending', { label:'恢复中…' });
+    try {
+      await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', transactionId, operationId));
+      queueBalancedHandoff('transaction', transactionId);
+      setActionButtonState(button, 'success');
+      renderRecycle();
+      showToast(result.duplicate ? '重复恢复已阻止。' : '已恢复账目并重新核对余额。', result.duplicate ? 'warning' : 'success');
+    } catch (error) {
+      setActionButtonState(button, 'error');
+      showToast(`无法恢复账目：${error.message}`, 'error');
+    } finally {
+      releaseActionButton(button);
+    }
   }));
   document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', async () => {
+    if (!confirm('永久删除这笔账目？此操作无法撤销。')) return;
     const operationId = uid('delete');
     const prior = ledger.transactions.find(entry => entry.id === button.dataset.delete);
     const result = permanentlyDelete(ledger, button.dataset.delete, operationId);
-    await applyLedgerChange(result.ledger, async () => {
-      if (usesCloudStore()) await cloud.purgeTransaction(currentHousehold.id, button.dataset.delete, operationId);
-    }, pendingLedgerPatch(result.ledger, 'transactionPatch', button.dataset.delete, operationId, { ...prior, purgedAt:new Date().toISOString(), lastOperationId:operationId }));
-    renderRecycle();
-    showToast(result.duplicate ? '重复删除已阻止。' : '已永久移除这笔账目。');
+    setActionButtonState(button, 'pending', { label:'删除中…' });
+    try {
+      await applyLedgerChange(result.ledger, async () => {
+        if (usesCloudStore()) await cloud.purgeTransaction(currentHousehold.id, button.dataset.delete, operationId);
+      }, pendingLedgerPatch(result.ledger, 'transactionPatch', button.dataset.delete, operationId, { ...prior, purgedAt:new Date().toISOString(), lastOperationId:operationId }));
+      setActionButtonState(button, 'success');
+      renderRecycle();
+      showToast(result.duplicate ? '重复删除已阻止。' : '已永久移除这笔账目。', result.duplicate ? 'warning' : 'success');
+    } catch (error) {
+      setActionButtonState(button, 'error');
+      showToast(`无法永久删除账目：${error.message}`, 'error');
+    } finally {
+      releaseActionButton(button);
+    }
   }));
 }
 
@@ -2249,15 +2847,17 @@ async function downloadCurrentBackup({ closeSettings = false } = {}) {
 
 async function exportLocal() {
   const button = $('#exportButton');
-  button.disabled = true;
-  $('#settingsMessage').textContent = '';
+  setActionButtonState(button, 'pending', { label:'导出中…' });
+  clearFeedback('#settingsMessage');
   try {
     await downloadCurrentBackup({ closeSettings:true });
-    showToast('已导出可校验备份；照片内容未包含。');
+    setActionButtonState(button, 'success');
+    showToast('已导出可校验备份；照片内容未包含。', 'success');
   } catch (error) {
-    $('#settingsMessage').textContent = `无法导出：${error.message}`;
+    setActionButtonState(button, 'error');
+    setFeedback('#settingsMessage', `无法导出：${error.message}`, 'error', button);
   } finally {
-    button.disabled = false;
+    releaseActionButton(button);
   }
 }
 
@@ -2289,8 +2889,8 @@ async function prepareRestoreFile(file) {
   });
   pendingRestore = { mode, payload, identity, validated };
   renderRestorePreview(validated, mode);
-  $('#restoreMessage').textContent = '';
-  $('#confirmRestoreButton').disabled = false;
+  clearFeedback('#restoreMessage');
+  resetActionButton($('#confirmRestoreButton'));
   showDialog($('#restorePreviewDialog'), () => $('#confirmRestoreButton').focus());
 }
 
@@ -2298,15 +2898,14 @@ async function confirmRestore() {
   if (!pendingRestore) return;
   const request = pendingRestore;
   const button = $('#confirmRestoreButton');
-  button.disabled = true;
-  button.setAttribute('aria-busy', 'true');
-  button.textContent = '恢复中…';
-  $('#restoreMessage').textContent = '';
+  setActionButtonState(button, 'pending', { label:'恢复中…' });
+  clearFeedback('#restoreMessage');
   try {
     if (request.mode === 'cloud') {
       if (!cloudUser || !cloudProfile || !isCurrentOwner()) throw new Error('只有当前账本建立者可以恢复云端备份');
       const result = await cloud.restoreBackupCopy({ identity:request.identity, validated:request.validated, user:cloudUser });
       if (result.householdId !== request.identity.householdId) throw new Error('恢复副本回读不一致');
+      setActionButtonState(button, 'success');
       const refreshUrl = new URL(location.href);
       refreshUrl.searchParams.set('wallet-restored', result.householdId);
       location.replace(refreshUrl.href);
@@ -2317,13 +2916,14 @@ async function confirmRestore() {
         validated:request.validated,
         downloadCurrent:() => downloadCurrentBackup({ closeSettings:false })
       });
+      setActionButtonState(button, 'success');
       location.reload();
     }
   } catch (error) {
-    $('#restoreMessage').textContent = `恢复失败：${error.message}。当前账本未切换。`;
-    button.disabled = false;
-    button.removeAttribute('aria-busy');
-    button.textContent = '确认并恢复';
+    setActionButtonState(button, 'error');
+    setFeedback('#restoreMessage', `恢复失败：${error.message}。当前账本未切换。`, 'error', button);
+  } finally {
+    releaseActionButton(button);
   }
 }
 
@@ -2366,6 +2966,12 @@ function applyPendingWalletUpdate() {
 function handleWalletUpdateMessage(event) {
   if (!hadServiceWorkerControllerAtStartup || event.data?.type !== 'FAMILY_WALLET_UPDATE_READY') return;
   pendingWalletUpdateCache = String(event.data.cache || 'latest');
+  if (hasOpenWalletDialog()) {
+    setSyncState('更新就绪，完成当前操作后刷新', false, 'update');
+    $('#syncBadge').setAttribute('role', 'status');
+    $('#syncBadge').setAttribute('aria-live', 'polite');
+    return;
+  }
   applyPendingWalletUpdate();
 }
 
@@ -2377,7 +2983,7 @@ function requestDialogClose(dialog) {
   else dismissDialog(dialog);
 }
 
-document.querySelectorAll('[data-view-target]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewTarget)));
+document.querySelectorAll('[data-view-target]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewTarget, true, true)));
 document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => requestDialogClose($(`#${button.dataset.closeDialog}`))));
 document.querySelectorAll('dialog').forEach(dialog => {
   dialog.addEventListener('click', event => {
@@ -2387,19 +2993,25 @@ document.querySelectorAll('dialog').forEach(dialog => {
     event.preventDefault();
     requestDialogClose(dialog);
   });
-  dialog.addEventListener('close', applyPendingWalletUpdate);
+  dialog.addEventListener('close', () => {
+    if (dialog.id === 'topbarActionsDialog') setStateIcon($('#moreButton'), 'closed');
+    applyPendingWalletUpdate();
+  });
 });
 $('#moreButton').addEventListener('click', () => {
+  setStateIcon($('#moreButton'), 'open');
   showDialog($('#topbarActionsDialog'));
 });
 function openSettingsDialog() {
-  $('#settingsMessage').textContent = '';
+  clearFeedback('#settingsMessage');
+  resetActionButton($('#exportButton'));
+  resetActionButton($('#refreshMembersButton'));
   renderMembers();
   showDialog($('#settingsDialog'));
 }
 $('#openSettingsButton').addEventListener('click', () => {
   dismissDialog($('#topbarActionsDialog'), () => {
-    $('#settingsMessage').textContent = '';
+    clearFeedback('#settingsMessage');
     renderMembers();
     showDialog($('#settingsDialog'));
   });
@@ -2412,18 +3024,18 @@ $('#desktopContextAction').addEventListener('click', () => {
 });
 $('#syncBadge').addEventListener('click', () => {
   if (runtimeMode === 'local') {
-    showToast('本机模式不需要云端同步。');
+    showToast('本机模式不需要云端同步。', 'neutral');
     return;
   }
   const state = syncCoordinator.getState();
   if (state.status === 'synced' && !itemListenerError) {
     if (hasOpenWalletDialog()) {
-      showToast('请先关闭正在使用的窗口，再刷新 App。');
+      showToast('请先关闭正在使用的窗口，再刷新 App。', 'warning');
       return;
     }
     const refreshUrl = new URL(location.href);
     refreshUrl.searchParams.set('wallet-refresh', String(Date.now()));
-    $('#syncBadge').textContent = '刷新中';
+    setSyncState('刷新中', false, 'update');
     $('#syncBadge').disabled = true;
     location.replace(refreshUrl.href);
     return;
@@ -2443,27 +3055,27 @@ $('#newItemCover').addEventListener('change', event => {
   const file = event.target.files?.[0] ?? null;
   clearPendingNewItemMedia('cover');
   updateNewItemUploadRow('cover', file);
-  $('#newItemCoverStatus').textContent = file ? '将在保存时按当前预览压缩为 JPEG' : '选择后可保留完整图片或自定义 4:5 裁切';
+  setMediaStatus('#newItemCoverStatus', 'cover', file ? 'selected' : 'idle');
   loadNewItemCoverPreview(file);
 });
 $('#newItemReceipt').addEventListener('change', event => {
   const file = event.target.files?.[0] ?? null;
   clearPendingNewItemMedia('receipt');
   updateNewItemUploadRow('receipt', file);
-  $('#newItemReceiptStatus').textContent = file ? '将在保存订金时压缩为 JPEG' : '仅在保存订金时读取并压缩';
+  setMediaStatus('#newItemReceiptStatus', 'receipt', file ? 'selected' : 'idle');
 });
 $('#removeNewItemCover').addEventListener('click', () => {
   $('#newItemCover').value = '';
   clearPendingNewItemMedia('cover');
   updateNewItemUploadRow('cover');
   resetNewItemCoverEditor();
-  $('#newItemCoverStatus').textContent = '选择后可保留完整图片或自定义 4:5 裁切';
+  setMediaStatus('#newItemCoverStatus', 'cover', 'idle');
 });
 $('#removeNewItemReceipt').addEventListener('click', () => {
   $('#newItemReceipt').value = '';
   clearPendingNewItemMedia('receipt');
   updateNewItemUploadRow('receipt');
-  $('#newItemReceiptStatus').textContent = '仅在保存订金时读取并压缩';
+  setMediaStatus('#newItemReceiptStatus', 'receipt', 'idle');
 });
 document.querySelectorAll('input[name="newItemCoverMode"]').forEach(input => input.addEventListener('change', event => {
   setNewItemCoverEdit({ mode:event.target.value, zoom:newItemCoverEdit.zoom, offsetX:newItemCoverEdit.offsetX, offsetY:newItemCoverEdit.offsetY });
@@ -2493,6 +3105,13 @@ $('#newItemCoverViewport').addEventListener('pointerup', finishNewItemCoverDrag)
 $('#newItemCoverViewport').addEventListener('pointercancel', finishNewItemCoverDrag);
 window.addEventListener('resize', renderNewItemCoverEditor);
 $('#paymentLinked').addEventListener('change', updatePaymentAccountRow);
+$('#paymentReceipt').addEventListener('change', event => {
+  if (pendingPayment) {
+    pendingPayment.receipt = null;
+    pendingPayment.receiptFile = null;
+  }
+  setMediaStatus('#paymentReceiptStatus', 'receipt', event.target.files?.length ? 'selected' : 'idle');
+});
 $('#payItemFullButton').addEventListener('click', () => openPaymentDialog(true));
 $('#payItemPartButton').addEventListener('click', () => openPaymentDialog(false));
 $('#editItemButton').addEventListener('click', openEditItem);
@@ -2506,6 +3125,7 @@ $('#editItemCover').addEventListener('change', event => {
     pendingItemEdit.cover = null;
     pendingItemEdit.coverFile = null;
   }
+  setMediaStatus('#editItemCoverStatus', 'cover', event.target.files?.length ? 'selected' : 'idle');
 });
 $('#editItemRemoveCover').addEventListener('change', event => {
   if (event.target.checked) {
@@ -2514,6 +3134,7 @@ $('#editItemRemoveCover').addEventListener('change', event => {
       pendingItemEdit.cover = null;
       pendingItemEdit.coverFile = null;
     }
+    setMediaStatus('#editItemCoverStatus', 'cover', 'idle');
   }
 });
 
@@ -2521,10 +3142,7 @@ $('#newItemForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (!pendingItemCreate) return;
   const button = $('#saveNewItemButton');
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '保存中…';
-  $('#newItemMessage').textContent = '';
+  clearFeedback('#newItemMessage');
   try {
     if (usesCloudStore() && !navigator.onLine) throw new Error('新增物品需要联网');
     const depositText = $('#newItemDepositAmount').value.trim();
@@ -2536,6 +3154,7 @@ $('#newItemForm').addEventListener('submit', async event => {
     const linked = hasDeposit && $('#newItemLinked').checked;
     const accountId = linked ? $('#newItemAccount').value : null;
     if (linked && !accountId) throw new Error('请选择付款账户，或关闭账目联动');
+    setActionButtonState(button, 'pending', { label:'保存中…' });
     const cover = await prepareFormMedia($('#newItemCover'), 'cover', pendingItemCreate, 'cover', $('#newItemCoverStatus'), currentNewItemCoverRenderPlan());
     const receipt = hasDeposit
       ? await prepareFormMedia($('#newItemReceipt'), 'receipt', pendingItemCreate, 'receipt', $('#newItemReceiptStatus'))
@@ -2590,15 +3209,18 @@ $('#newItemForm').addEventListener('submit', async event => {
       if (receipt) nextMedia.set(receipt.id, { ...receipt, itemId:pendingItemCreate.itemId, paymentId:pendingItemCreate.depositPaymentId, kind:'receipt' });
       commitLocalItemMutation(nextLedger, result.state, nextMedia);
     }
+    queueBalancedHandoff('item', pendingItemCreate.itemId);
+    if (hasDeposit) queueBalancedHandoff('payment', pendingItemCreate.depositPaymentId);
+    setActionButtonState(button, 'success');
     pendingItemCreate = null;
     dismissDialog($('#newItemDialog'));
     setView('items');
-    showToast(hasDeposit ? '物品与订金已保存。' : '物品已保存。');
+    showToast(hasDeposit ? '物品与订金已保存。' : '物品已保存。', 'success');
   } catch (error) {
-    $('#newItemMessage').textContent = error.message;
+    setActionButtonState(button, 'error');
+    reportSubmitError('#newItemMessage', event.currentTarget, error);
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 });
 
@@ -2606,10 +3228,7 @@ $('#paymentForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (!pendingPayment || !selectedItemId) return;
   const button = $('#savePaymentButton');
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '保存中…';
-  $('#paymentMessage').textContent = '';
+  clearFeedback('#paymentMessage');
   const wasFull = pendingPayment.full;
   try {
     if (usesCloudStore() && !navigator.onLine) throw new Error('记录付款需要联网');
@@ -2621,6 +3240,7 @@ $('#paymentForm').addEventListener('submit', async event => {
     const linked = $('#paymentLinked').checked;
     const accountId = linked ? $('#paymentAccount').value : null;
     if (linked && !accountId) throw new Error('请选择付款账户，或关闭账目联动');
+    setActionButtonState(button, 'pending', { label:'保存中…' });
     const receipt = await prepareFormMedia($('#paymentReceipt'), 'receipt', pendingPayment, 'receipt', $('#paymentReceiptStatus'));
     const input = {
       householdId:currentHousehold?.id,
@@ -2654,14 +3274,17 @@ $('#paymentForm').addEventListener('submit', async event => {
       if (receipt) nextMedia.set(receipt.id, { ...receipt, itemId:item.id, paymentId:pendingPayment.paymentId, kind:'receipt' });
       commitLocalItemMutation(nextLedger, result.state, nextMedia);
     }
+    queueBalancedHandoff('item', item.id);
+    queueBalancedHandoff('payment', pendingPayment.paymentId);
+    setActionButtonState(button, 'success');
     pendingPayment = null;
     dismissDialog($('#paymentDialog'));
-    showToast(wasFull ? '物品已付清。' : '付款已保存。');
+    showToast(wasFull ? '物品已付清。' : '付款已保存。', 'success');
   } catch (error) {
-    $('#paymentMessage').textContent = error.message;
+    setActionButtonState(button, 'error');
+    reportSubmitError('#paymentMessage', event.currentTarget, error);
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 });
 
@@ -2669,21 +3292,20 @@ $('#editItemForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (!pendingItemEdit || !selectedItemId) return;
   const button = $('#saveEditItemButton');
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = '保存中…';
-  $('#editItemMessage').textContent = '';
+  clearFeedback('#editItemMessage');
   try {
     if (usesCloudStore() && !navigator.onLine) throw new Error('编辑物品需要联网');
     const item = itemById(selectedItemId);
     if (!item) throw new Error('物品不存在');
+    const fullPriceMinor = amountToSen($('#editItemFullPrice').value);
+    setActionButtonState(button, 'pending', { label:'保存中…' });
     const cover = await prepareFormMedia($('#editItemCover'), 'cover', pendingItemEdit, 'cover', $('#editItemCoverStatus'));
     const removeCover = !cover && $('#editItemRemoveCover').checked;
     const changes = {
       name:$('#editItemName').value.trim(),
       note:$('#editItemNote').value.trim(),
       etaDate:$('#editItemEtaDate').value || null,
-      fullPriceMinor:amountToSen($('#editItemFullPrice').value)
+      fullPriceMinor
     };
     if (cover) changes.coverMediaId = cover.id;
     else if (removeCover) changes.coverMediaId = null;
@@ -2717,14 +3339,16 @@ $('#editItemForm').addEventListener('submit', async event => {
       if (cover) nextMedia.set(cover.id, { ...cover, itemId:item.id, paymentId:null, kind:'cover' });
       commitLocalItemMutation(ledger, result.state, nextMedia);
     }
+    queueBalancedHandoff('item', item.id);
+    setActionButtonState(button, 'success');
     pendingItemEdit = null;
     dismissDialog($('#editItemDialog'));
-    showToast('物品资料已更新。');
+    showToast('物品资料已更新。', 'success');
   } catch (error) {
-    $('#editItemMessage').textContent = error.message;
+    setActionButtonState(button, 'error');
+    reportSubmitError('#editItemMessage', event.currentTarget, error);
   } finally {
-    button.disabled = false;
-    button.textContent = original;
+    releaseActionButton(button);
   }
 });
 
@@ -2763,8 +3387,7 @@ $('#repaymentForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (!pendingRepayment) return;
   const button = $('#saveRepaymentButton');
-  button.disabled = true;
-  $('#repaymentMessage').textContent = '';
+  clearFeedback('#repaymentMessage');
   try {
     if (!navigator.onLine) throw new Error('记录还款需要联网');
     if (pendingRepayment.transactionId) throw new Error('既有还款不能直接覆写，请移入回收站后重新记录');
@@ -2786,12 +3409,19 @@ $('#repaymentForm').addEventListener('submit', async event => {
     if (funding === 'asset' && !changes.accountId) throw new Error('请选择付款账户');
     const result = applyLedgerOperation(ledger, { id:pendingRepayment.operationId, ...changes });
     const transactionId = pendingRepayment.operationId;
+    setActionButtonState(button, 'pending', { label:'保存中…' });
     await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', transactionId, pendingRepayment.operationId));
+    queueBalancedHandoff('transaction', transactionId);
+    setActionButtonState(button, 'success');
     pendingRepayment = null;
     closeRepayment({ returnToDetail:true });
-    showToast('还款已保存。');
-  } catch (error) { $('#repaymentMessage').textContent = error.message; }
-  finally { button.disabled = false; }
+    showToast('还款已保存。', 'success');
+  } catch (error) {
+    setActionButtonState(button, 'error');
+    setFeedback('#repaymentMessage', error.message, 'error', $('#repaymentAmount'));
+  } finally {
+    releaseActionButton(button);
+  }
 });
 document.querySelectorAll('[data-category]').forEach(button => button.addEventListener('click', () => {
   selectCategory(button.dataset.category, button.dataset.category === '其它');
@@ -2802,12 +3432,12 @@ $('#customCategoryInput').addEventListener('input', event => {
 $('#accountPhotoInput').addEventListener('change', async event => {
   const [file] = event.target.files || [];
   if (!file) return;
-  $('#accountMessage').textContent = '';
+  clearFeedback('#accountMessage');
   try {
     pendingAccountPhotoDataUrl = await compressAccountPhoto(file);
     renderAccountPhotoPreview();
   } catch (error) {
-    $('#accountMessage').textContent = error.message;
+    setFeedback('#accountMessage', error.message, 'error', event.currentTarget?.querySelector?.(':invalid') || $('#accountName'));
   } finally {
     event.target.value = '';
   }
@@ -2816,21 +3446,19 @@ $('#removeAccountPhotoButton').addEventListener('click', () => {
   pendingAccountPhotoDataUrl = null;
   renderAccountPhotoPreview();
 });
-$('#viewAllEntriesButton').addEventListener('click', () => setView('entries'));
+$('#viewAllEntriesButton').addEventListener('click', () => setView('entries', true, true));
 $('#exportButton').addEventListener('click', exportLocal);
 $('#restoreFileInput').addEventListener('change', async event => {
   const file = event.target.files?.[0] ?? null;
-  $('#settingsMessage').textContent = '';
+  clearFeedback('#settingsMessage');
   try { await prepareRestoreFile(file); }
-  catch (error) { $('#settingsMessage').textContent = `无法预览备份：${error.message}`; }
+  catch (error) { setFeedback('#settingsMessage', `无法预览备份：${error.message}`, 'error', $('#restoreFileInput')); }
   finally { event.target.value = ''; }
 });
 $('#confirmRestoreButton').addEventListener('click', confirmRestore);
 $('#restorePreviewDialog').addEventListener('close', () => {
   pendingRestore = null;
-  $('#confirmRestoreButton').disabled = false;
-  $('#confirmRestoreButton').removeAttribute('aria-busy');
-  $('#confirmRestoreButton').textContent = '确认并恢复';
+  resetActionButton($('#confirmRestoreButton'));
 });
 $('#recycleButton').addEventListener('click', () => { renderRecycle(); showDialog($('#recycleDialog')); });
 $('#closeRecycleButton').addEventListener('click', () => dismissDialog($('#recycleDialog')));
@@ -2855,7 +3483,7 @@ $('#entryFilterForm').addEventListener('submit', event => {
   const dateFrom = $('#entryDateFrom').value;
   const dateTo = $('#entryDateTo').value;
   if (dateFrom && dateTo && dateFrom > dateTo) {
-    showToast('开始日期不能晚于结束日期。');
+    showToast('开始日期不能晚于结束日期。', 'warning');
     return;
   }
   entryFilters = {
@@ -2876,7 +3504,7 @@ $('#clearEntryFilters').addEventListener('click', () => {
   $('#entrySearchInput').focus();
 });
 $('#openEntryShortcuts').addEventListener('click', () => {
-  $('#entryShortcutMessage').textContent = '';
+  clearFeedback('#entryShortcutMessage');
   renderEntryTemplates();
   showDialog($('#entryShortcutsDialog'), () => $('#copyPreviousEntry').focus());
 });
@@ -2884,13 +3512,13 @@ $('#copyPreviousEntry').addEventListener('click', () => {
   const kind = currentEntryKind();
   const copy = copyPreviousEntry(liveEntries(), kind);
   if (!copy) {
-    $('#entryShortcutMessage').textContent = `还没有可复制的${typeLabel(kind)}。`;
+    setFeedback('#entryShortcutMessage', `还没有可复制的${typeLabel(kind)}。`, 'warning', $('#copyPreviousEntry'));
     return;
   }
   dismissDialog($('#entryShortcutsDialog'), () => applyEntryBusinessFields(copy, `已复制上一笔${typeLabel(kind)}，日期已改为今天，请确认后保存。`));
 });
 $('#saveEntryTemplate').addEventListener('click', () => {
-  $('#entryShortcutMessage').classList.remove('success');
+  clearFeedback('#entryShortcutMessage');
   try {
     const template = currentEntryTemplate();
     const suggested = template.note || template.category || '常用账目';
@@ -2899,10 +3527,9 @@ $('#saveEntryTemplate').addEventListener('click', () => {
     const scope = currentScope();
     saveEntryTemplate(localStorage, scope.userId, scope.householdId, { ...template, name:name.trim() || suggested });
     renderEntryTemplates();
-    $('#entryShortcutMessage').textContent = '已存为常用账目，不会自动提交。';
-    $('#entryShortcutMessage').classList.add('success');
+    setFeedback('#entryShortcutMessage', '已存为常用账目，不会自动提交。', 'success');
   } catch (error) {
-    $('#entryShortcutMessage').textContent = error.message;
+    setFeedback('#entryShortcutMessage', error.message, 'error', $('#saveEntryTemplate'));
   }
 });
 $('#dismissGettingStarted').addEventListener('click', () => {
@@ -2910,19 +3537,33 @@ $('#dismissGettingStarted').addEventListener('click', () => {
   dismissOnboarding(localStorage, scope.userId, scope.householdId);
   renderOnboarding();
 });
-$('#refreshMembersButton').addEventListener('click', () => {
-  if (usesCloudStore() && currentHousehold) restartMembersListener(currentHousehold.id);
-  else renderMembers();
+$('#refreshMembersButton').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  setActionButtonState(button, 'pending', { label:'载入中…' });
+  clearFeedback('#settingsMessage');
+  try {
+    const result = usesCloudStore() && currentHousehold
+      ? await restartMembersListener(currentHousehold.id)
+      : (renderMembers(), { ok:true });
+    if (result?.ok === false) throw result.error;
+    setActionButtonState(button, 'success');
+  } catch (error) {
+    setActionButtonState(button, 'error');
+    setFeedback('#settingsMessage', `成员载入失败：${error.message}`, 'error', button);
+  } finally {
+    releaseActionButton(button);
+  }
 });
 $('#monthPicker').addEventListener('change', event => {
   if (!event.target.value) return;
   selectedMonth = event.target.value;
+  setStateIcon($('#monthFilterButton'), 'selected');
   render();
 });
 $('#monthForm').addEventListener('submit', event => {
   event.preventDefault();
   dismissDialog($('#monthDialog'));
-  setView('entries');
+  setView('entries', true, true);
 });
 document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener('change', () => {
   updateKindState();
@@ -2934,8 +3575,7 @@ $('#entryForm').addEventListener('submit', async event => {
   if (saveLocked) return;
   saveLocked = true;
   const button = $('#saveEntryButton');
-  button.disabled = true;
-  $('#entryMessage').textContent = '';
+  clearFeedback('#entryMessage');
   try {
     const form = new FormData(event.currentTarget);
     const kind = form.get('kind');
@@ -2955,32 +3595,49 @@ $('#entryForm').addEventListener('submit', async event => {
       ? updateTransaction(ledger, editingTransactionId, changes, pendingOperationId)
       : applyLedgerOperation(ledger, { id:pendingOperationId, ...changes });
     const transactionId = editingTransactionId || pendingOperationId;
+    setActionButtonState(button, 'pending', { label:'保存中…' });
     await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, transactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', transactionId, pendingOperationId));
+    queueBalancedHandoff('transaction', transactionId);
+    setActionButtonState(button, 'success');
     rememberEntryPreferences(kind, changes.accountId, changes.targetAccountId);
     dismissDialog($('#entryDialog'));
     if (!editingTransactionId) setView('entries');
-    showToast(result.duplicate ? '重复保存已阻止。' : editingTransactionId ? '修改已保存，余额已重新核对。' : '已保存，余额已重新核对。');
+    showToast(result.duplicate ? '重复保存已阻止。' : editingTransactionId ? '修改已保存，余额已重新核对。' : '已保存，余额已重新核对。', result.duplicate ? 'warning' : 'success');
   } catch (error) {
-    $('#entryMessage').textContent = error.message;
-    button.disabled = false;
+    setActionButtonState(button, 'error');
+    reportSubmitError('#entryMessage', event.currentTarget, error);
     saveLocked = false;
+  } finally {
+    releaseActionButton(button);
   }
 });
 
-$('#archiveTransactionButton').addEventListener('click', async () => {
+$('#archiveTransactionButton').addEventListener('click', async event => {
   const editingTransactionId = $('#editingTransactionId').value;
   if (!editingTransactionId) return;
+  const button = event.currentTarget;
   const operationId = uid('recycle');
   const result = moveToRecycleBin(ledger, editingTransactionId, operationId);
-  await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, editingTransactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', editingTransactionId, operationId));
-  dismissDialog($('#entryDialog'));
-  setView('entries');
-  showToast(result.duplicate ? '重复回收已阻止。' : '已移入回收站，余额已重新核对。');
+  setActionButtonState(button, 'pending', { label:'处理中…' });
+  try {
+    await applyLedgerChange(result.ledger, next => saveTransactionRecord(next, editingTransactionId), pendingLedgerPatch(result.ledger, 'transactionPatch', editingTransactionId, operationId));
+    queueBalancedHandoff('transaction', editingTransactionId);
+    setActionButtonState(button, 'success');
+    dismissDialog($('#entryDialog'));
+    setView('entries');
+    showToast(result.duplicate ? '重复回收已阻止。' : '已移入回收站，余额已重新核对。', result.duplicate ? 'warning' : 'success');
+  } catch (error) {
+    setActionButtonState(button, 'error');
+    setFeedback('#entryMessage', error.message, 'error', button);
+  } finally {
+    releaseActionButton(button);
+  }
 });
 
 $('#accountForm').addEventListener('submit', async event => {
   event.preventDefault();
-  $('#accountMessage').textContent = '';
+  const button = $('#saveAccountButton');
+  clearFeedback('#accountMessage');
   try {
     const id = $('#editingAccountId').value;
     const name = $('#accountName').value;
@@ -3012,23 +3669,41 @@ $('#accountForm').addEventListener('submit', async event => {
       ...metadata
     });
     const accountId = id || nextLedger.accounts.at(-1).id;
+    setActionButtonState(button, 'pending', { label:'保存中…' });
     await applyLedgerChange(nextLedger, next => saveAccountRecord(next, accountId), pendingLedgerPatch(nextLedger, 'accountPatch', accountId, pendingAccountOperationId));
+    queueBalancedHandoff('account', accountId);
+    setActionButtonState(button, 'success');
     dismissDialog($('#accountDialog'));
     setView('accounts');
-    showToast(id ? '账户设置已保存。' : '新账户已加入当前账本。');
+    showToast(id ? '账户设置已保存。' : '新账户已加入当前账本。', 'success');
   } catch (error) {
-    $('#accountMessage').textContent = error.message;
+    setActionButtonState(button, 'error');
+    setFeedback('#accountMessage', error.message, 'error', event.currentTarget?.querySelector?.(':invalid') || $('#accountName'));
+  } finally {
+    releaseActionButton(button);
   }
 });
 
-$('#archiveAccountButton').addEventListener('click', async () => {
+$('#archiveAccountButton').addEventListener('click', async event => {
   const id = $('#editingAccountId').value;
   if (!id) return;
+  if (!confirm('归档后，这个账户会被隐藏并从家庭净额排除；目前没有恢复入口。确定继续吗？')) return;
+  const button = event.currentTarget;
   const nextLedger = archiveAccount(ledger, id);
-  await applyLedgerChange(nextLedger, next => saveAccountRecord(next, id), pendingLedgerPatch(nextLedger, 'accountPatch', id, pendingAccountOperationId));
-  dismissDialog($('#accountDialog'));
-  setView('accounts');
-  showToast('账户已归档，并从家庭净额排除。');
+  setActionButtonState(button, 'pending', { label:'处理中…' });
+  try {
+    await applyLedgerChange(nextLedger, next => saveAccountRecord(next, id), pendingLedgerPatch(nextLedger, 'accountPatch', id, pendingAccountOperationId));
+    queueBalancedHandoff('account', id);
+    setActionButtonState(button, 'success');
+    dismissDialog($('#accountDialog'));
+    setView('accounts');
+    showToast('账户已归档，并从家庭净额排除。', 'success');
+  } catch (error) {
+    setActionButtonState(button, 'error');
+    setFeedback('#accountMessage', error.message, 'error', button);
+  } finally {
+    releaseActionButton(button);
+  }
 });
 
 function stopItemListeners() {
@@ -3057,12 +3732,12 @@ function restartHouseholdListener(listenerToken, householdId) {
       currentListenerToken = syncCoordinator.activateHousehold(cloudSessionToken, rollbackId);
       $('#workspaceSelect').value = rollbackId;
       restartHouseholdListener(currentListenerToken, rollbackId);
-      showToast(`无法切换账本，已返回原账本：${error.message}`);
+      showToast(`无法切换账本，已返回原账本：${error.message}`, 'error');
       return;
     }
     setSwitching(false);
     if (!currentHousehold) showAuth(`无法读取这个账本：${error.message}`);
-    else showToast(`实时同步暂时中断：${error.message}`);
+    else showToast(`实时同步暂时中断：${error.message}`, 'error');
   });
 }
 
@@ -3070,19 +3745,27 @@ function restartItemsListener(householdId) {
   stopItemsWatch?.();
   stopItemsWatch = null;
   if (!usesCloudStore() || !householdId || householdId !== desiredHouseholdId) return;
+  const sameScope = itemReadState.householdId === householdId;
+  if (!sameScope) itemRecords = [];
+  const generation = itemReadState.generation + 1;
+  itemReadState = { householdId, generation, hasSnapshot:false, error:null };
+  itemListenerError = null;
+  renderItemsView();
   stopItemsWatch = cloud.subscribeItems(householdId, state => {
-    if (householdId !== desiredHouseholdId || currentHousehold?.id !== householdId) return;
+    if (generation !== itemReadState.generation || householdId !== desiredHouseholdId || currentHousehold?.id !== householdId) return;
     itemListenerError = null;
+    itemReadState = { ...itemReadState, hasSnapshot:true, error:null };
     itemRecords = state.items.map(normaliseDisplayItem);
     renderSyncStatus();
     renderItemsView();
     renderUpcomingActions();
     if (selectedItemId && $('#itemDetailDialog').open) renderItemDetail();
   }, error => {
-    if (householdId !== desiredHouseholdId) return;
+    if (generation !== itemReadState.generation || householdId !== desiredHouseholdId) return;
     itemListenerError = error.message;
+    itemReadState = { ...itemReadState, error:error.message };
     renderSyncStatus();
-    $('#itemsMessage').textContent = `物品实时更新中断：${error.message}`;
+    renderItemsView();
   });
 }
 
@@ -3098,12 +3781,13 @@ function switchCloudHousehold(householdId, { persistSelection = false } = {}) {
   stopMembersWatch?.();
   stopMembersWatch = null;
   memberReadGeneration += 1;
+  memberReadState = { householdId, generation:memberReadGeneration, membersKnown:false, invitesKnown:false, membersError:null, invitesError:null };
   if ($('#itemDetailDialog').open) closeItemDetail();
   currentListenerToken = syncCoordinator.activateHousehold(cloudSessionToken, householdId);
   restartHouseholdListener(currentListenerToken, householdId);
   if (persistSelection && cloudUser) {
     cloud.selectHousehold(cloudUser.uid, householdId).catch(error => {
-      if (householdId === desiredHouseholdId) showToast(`账本已切换，但偏好保存失败：${error.message}`);
+      if (householdId === desiredHouseholdId) showToast(`账本已切换，但偏好保存失败：${error.message}`, 'warning');
     });
   }
 }
@@ -3134,6 +3818,8 @@ async function handleCloudUser(user) {
   householdMembers = [];
   householdPendingInvites = [];
   memberReadGeneration += 1;
+  memberReadState = { householdId:null, generation:memberReadGeneration, membersKnown:false, invitesKnown:false, membersError:null, invitesError:null };
+  itemReadState = { householdId:null, generation:itemReadState.generation + 1, hasSnapshot:false, error:null };
   currentHousehold = null;
   desiredHouseholdId = null;
   currentListenerToken = null;
@@ -3154,10 +3840,10 @@ async function handleCloudUser(user) {
   const sessionToken = cloudSessionToken;
   stopUserWatch = cloud.watchUser(user.uid, value => applyCloudProfile(value, sessionToken).catch(error => {
     if (!currentHousehold && sessionToken === cloudSessionToken) showAuth(error.message);
-    else showToast(error.message);
+    else showToast(error.message, 'error');
   }), error => {
     if (!currentHousehold && sessionToken === cloudSessionToken) showAuth(error.message);
-    else showToast(`个人资料监听中断：${error.message}`);
+    else showToast(`个人资料监听中断：${error.message}`, 'error');
   });
   stopInviteWatch = cloud.watchInvite(user.email, invite => {
     if (sessionToken !== cloudSessionToken) return;
@@ -3168,7 +3854,7 @@ async function handleCloudUser(user) {
       $('#pendingInvitePanel').hidden = false;
       showAuth(`你已使用 ${user.email} 登录。`);
     }
-  }, error => currentHousehold ? showToast(error.message) : showAuth(error.message));
+  }, error => currentHousehold ? showToast(error.message, 'error') : showAuth(error.message, 'error'));
   await applyCloudProfile(profile, sessionToken);
 }
 
@@ -3184,19 +3870,17 @@ $('#googleSignInButton').addEventListener('click', async () => {
   if (googleSignInPending) return;
   const button = $('#googleSignInButton');
   googleSignInPending = true;
-  button.disabled = true;
-  button.setAttribute('aria-busy', 'true');
-  button.textContent = '等待 Google 登录…';
+  setActionButtonState(button, 'pending', { label:'等待 Google 登录…' });
   showAuth('Google 登录窗口已打开，请在该窗口完成登录。');
   try {
     await cloud.signInGoogle();
+    setActionButtonState(button, 'success');
   } catch (error) {
-    showAuth(googleSignInErrorMessage(error));
+    setActionButtonState(button, 'error');
+    showAuth(googleSignInErrorMessage(error), 'error');
   } finally {
     googleSignInPending = false;
-    button.disabled = false;
-    button.removeAttribute('aria-busy');
-    button.textContent = '使用 Google 帐号登录';
+    releaseActionButton(button);
   }
 });
 
@@ -3220,7 +3904,8 @@ $('#workspaceSelect').addEventListener('change', event => {
 });
 function openInviteDialog() {
   $('#inviteForm').reset();
-  $('#inviteMessage').textContent = '';
+  clearFeedback('#inviteMessage');
+  resetActionButton($('#sendInviteButton'));
   showDialog($('#inviteDialog'));
 }
 $('#inviteMemberButton').addEventListener('click', () => {
@@ -3229,8 +3914,9 @@ $('#inviteMemberButton').addEventListener('click', () => {
 });
 $('#inviteForm').addEventListener('submit', async event => {
   event.preventDefault();
-  $('#inviteMessage').textContent = '';
-  $('#sendInviteButton').disabled = true;
+  const button = $('#sendInviteButton');
+  clearFeedback('#inviteMessage');
+  setActionButtonState(button, 'pending', { label:'发送中…' });
   try {
     await cloud.inviteMember({
       householdId: currentHousehold.id,
@@ -3239,26 +3925,31 @@ $('#inviteForm').addEventListener('submit', async event => {
       ownerEmail: cloudUser.email,
       ownerDisplayName: cloudUser.displayName
     });
+    setActionButtonState(button, 'success');
     dismissDialog($('#inviteDialog'));
-    showToast('邀请已建立。对方使用该 Gmail 登录后即可加入家庭账本。');
+    showToast('邀请已建立。对方使用该 Gmail 登录后即可加入家庭账本。', 'success');
   } catch (error) {
-    $('#inviteMessage').textContent = error.message;
+    setActionButtonState(button, 'error');
+    setFeedback('#inviteMessage', error.message, 'error', $('#inviteEmail'));
   } finally {
-    $('#sendInviteButton').disabled = false;
+    releaseActionButton(button);
   }
 });
 $('#acceptInviteButton').addEventListener('click', async () => {
   if (!pendingInvite || !cloudUser) return;
-  $('#acceptInviteButton').disabled = true;
+  const button = $('#acceptInviteButton');
+  setActionButtonState(button, 'pending', { label:'加入中…' });
   try {
     await cloud.acceptInvite({ invite: pendingInvite, user: cloudUser });
+    setActionButtonState(button, 'success');
     pendingInvite = null;
     $('#pendingInvitePanel').hidden = true;
     showAuth('正在打开家庭账本…');
   } catch (error) {
-    showAuth(`无法加入家庭账本：${error.message}`);
+    setActionButtonState(button, 'error');
+    showAuth(`无法加入家庭账本：${error.message}`, 'error');
   } finally {
-    $('#acceptInviteButton').disabled = false;
+    releaseActionButton(button);
   }
 });
 
@@ -3329,6 +4020,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') requestForegroundRecovery('visibility');
 });
 
+initializeFeedbackRows();
+initializeActionButtons();
 applyTheme(localStorage.getItem(THEME_STORE) || document.documentElement.dataset.theme || 'teal', { persist:false });
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', handleWalletUpdateMessage);
