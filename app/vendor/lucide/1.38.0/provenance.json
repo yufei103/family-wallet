@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "name": "lucide-static",
+    "version": "1.38.0",
+    "license": "ISC",
+    "repository": "https://github.com/lucide-icons/lucide.git",
+    "npmIntegrity": "sha512-/pRaHJceXrQyAMzWfwhWPMwZeiZEIejZ+Ko226AqI52QbLVgowyGAp7OzZIaQEf7XB+LuRGWqUGqTfu3LJ0CQQ=="
+  },
+  "runtimeClosure": {
+    "allowedFiles": ["LICENSE", "provenance.json"],
+    "generatedEndpointFile": "app/lucide-icon-data.js",
+    "selectedIconCount": 56,
+    "source": "node_modules/lucide-static/icons/*.svg",
+    "generator": "scripts/generate-lucide-icons.mjs"
+  },
+  "localModifications": "Selected SVG primitives are deterministically normalized into 24x24 compound path endpoints; official package bytes are otherwise not shipped."
+}

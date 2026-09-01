@@ -153,14 +153,35 @@ if (!license.includes('MIT License') || !license.includes('Copyright (c) 2026 Gu
   issues.push(`${vendorRelative}/LICENSE: incomplete MIT notice`);
 }
 
-const iconProductionFiles = ['app/state-icon-data.js', 'app/state-icon-motion.js'];
-const forbiddenIconSource = /https?:\/\/|["'`]\/\/[A-Za-z0-9]|\b(?:React|Vue|Svelte|Lucide|Iconify|customElements)\b|font-awesome|\.woff2?\b/i;
+const lucideRelative = 'app/vendor/lucide/1.38.0';
+const lucideRoot = resolve(root, lucideRelative);
+const expectedLucideFiles = ['LICENSE', 'provenance.json'];
+try {
+  const actual = (await readdir(lucideRoot)).sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expectedLucideFiles)) issues.push(`${lucideRelative}: unexpected closure`);
+  const lucideLicense = await readFile(resolve(lucideRoot, 'LICENSE'));
+  if (sha256(lucideLicense) !== 'b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57') {
+    issues.push(`${lucideRelative}/LICENSE: pinned SHA-256 mismatch`);
+  }
+  const lucideProvenance = JSON.parse(await readFile(resolve(lucideRoot, 'provenance.json'), 'utf8'));
+  if (lucideProvenance.package?.name !== 'lucide-static' || lucideProvenance.package?.version !== '1.38.0'
+    || lucideProvenance.package?.license !== 'ISC'
+    || lucideProvenance.package?.npmIntegrity !== 'sha512-/pRaHJceXrQyAMzWfwhWPMwZeiZEIejZ+Ko226AqI52QbLVgowyGAp7OzZIaQEf7XB+LuRGWqUGqTfu3LJ0CQQ=='
+    || lucideProvenance.runtimeClosure?.selectedIconCount !== 56) {
+    issues.push(`${lucideRelative}/provenance.json: package provenance mismatch`);
+  }
+} catch (error) {
+  issues.push(`${lucideRelative}: invalid or missing (${error.message})`);
+}
+
+const iconProductionFiles = ['app/state-icon-data.js', 'app/lucide-icon-data.js', 'app/state-icon-motion.js'];
+const forbiddenIconSource = /https?:\/\/|["'`]\/\/[A-Za-z0-9]|\b(?:React|Vue|Svelte|Iconify|customElements)\b|font-awesome|\.woff2?\b/i;
 const iconBuffers = [];
 for (const relative of iconProductionFiles) {
   try {
     const bytes = await readFile(resolve(root, relative));
     iconBuffers.push(bytes);
-    if (forbiddenIconSource.test(bytes.toString('utf8'))) issues.push(`${relative}: remote, framework, icon-font or second-family reference`);
+    if (forbiddenIconSource.test(bytes.toString('utf8'))) issues.push(`${relative}: remote, framework or icon-font reference`);
   } catch (error) {
     issues.push(`${relative}: missing (${error.code || error.message})`);
   }
@@ -171,7 +192,7 @@ const vendorGzipBudget = 13 * 1024;
 if (runtimeBuffers.length === 3 && vendorGzip > vendorGzipBudget) {
   issues.push(`${vendorRelative}: exceeds 13 KiB gzip-9 budget (${vendorGzip} bytes)`);
 }
-if (totalIconGzip > 20 * 1024) issues.push(`state icon JavaScript exceeds 20 KiB gzip budget (${totalIconGzip} bytes)`);
+if (totalIconGzip > 32 * 1024) issues.push(`state icon JavaScript exceeds 32 KiB gzip budget (${totalIconGzip} bytes)`);
 
 if (issues.length) {
   const uniqueIssues = [...new Set(issues)];
@@ -179,5 +200,5 @@ if (issues.length) {
   for (const issue of uniqueIssues) console.error(`- ${issue}`);
   process.exitCode = 1;
 } else {
-  console.log(`Public audit passed: ${new Set(files).size} text files; Morphicons 1.7.1 closure pinned; icon JavaScript ${totalIconGzip} bytes gzip-9; no credential or personal-email artifacts found.`);
+  console.log(`Public audit passed: ${new Set(files).size} text files; Morphicons 1.7.1 and Lucide 1.38.0 are pinned; icon JavaScript ${totalIconGzip} bytes gzip-9; no credential or personal-email artifacts found.`);
 }
