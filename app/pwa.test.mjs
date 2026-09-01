@@ -18,9 +18,10 @@ test('PWA 声明与离线 worker 引用所有首屏模块', async () => {
   for (const asset of [
     'index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js', 'items-view.js',
     'cloud-sync.js', 'backup-restore.js', 'wallet-features.js', 'firebase-config.js', 'firebase-client.js',
-    'state-icon-data.js', 'state-icon-motion.js', 'vendor/morphicons/1.7.1/dom.js',
+    'state-icon-data.js', 'lucide-icon-data.js', 'state-icon-motion.js', 'vendor/morphicons/1.7.1/dom.js',
     'vendor/morphicons/1.7.1/spring-CFHloqPP.js', 'vendor/morphicons/1.7.1/normalize-CYnN3Npw.js',
-    'vendor/morphicons/1.7.1/LICENSE', 'vendor/morphicons/1.7.1/provenance.json'
+    'vendor/morphicons/1.7.1/LICENSE', 'vendor/morphicons/1.7.1/provenance.json',
+    'vendor/lucide/1.38.0/LICENSE', 'vendor/lucide/1.38.0/provenance.json'
   ]) assert.match(worker, new RegExp(asset.replaceAll('.', '\\.')));
   for (const icon of ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png']) assert.match(worker, new RegExp(icon.replace('.', '\\.')));
   assert.match(worker, /self\.skipWaiting\(\)/);
@@ -49,7 +50,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-30/);
+  assert.match(worker, /family-wallet-v2-cloud-31-lucide-trial/);
 });
 
 test('Morphicons PWA foundation is pinned, self-hosted, progressive and framework-free', async () => {
@@ -64,9 +65,10 @@ test('Morphicons PWA foundation is pinned, self-hosted, progressive and framewor
     readFile(app('../THIRD_PARTY_NOTICES.md'), 'utf8'), readFile(app('../package.json'), 'utf8')
   ]);
   const closure = [
-    'state-icon-data.js', 'state-icon-motion.js', 'vendor/morphicons/1.7.1/dom.js',
+    'state-icon-data.js', 'lucide-icon-data.js', 'state-icon-motion.js', 'vendor/morphicons/1.7.1/dom.js',
     'vendor/morphicons/1.7.1/spring-CFHloqPP.js', 'vendor/morphicons/1.7.1/normalize-CYnN3Npw.js',
-    'vendor/morphicons/1.7.1/LICENSE', 'vendor/morphicons/1.7.1/provenance.json'
+    'vendor/morphicons/1.7.1/LICENSE', 'vendor/morphicons/1.7.1/provenance.json',
+    'vendor/lucide/1.38.0/LICENSE', 'vendor/lucide/1.38.0/provenance.json'
   ];
   for (const asset of closure) {
     assert.match(worker, new RegExp(asset.replaceAll('.', '\\.')));
@@ -87,7 +89,7 @@ test('Morphicons PWA foundation is pinned, self-hosted, progressive and framewor
   assert.match(motion, /createMorphInstance\(path, initial\.d, \{ reducedMotion: 'user' \}\)/);
   assert.match(data, /stateIconMarkup[\s\S]*<path data-state-icon-path d="\$\{icon\.d\}"\/>/);
   assert.match(data, /staticIconMarkup[\s\S]*<path data-state-icon-path d="\$\{icon\.d\}"\/>/);
-  assert.doesNotMatch(data + motion, /https?:\/\/|\b(?:React|Vue|Svelte|Lucide|Tabler|Iconify|customElements)\b|font-awesome|\.woff2?\b/i);
+  assert.doesNotMatch(data + motion, /https?:\/\/|\b(?:React|Vue|Svelte|Tabler|Iconify|customElements)\b|font-awesome|\.woff2?\b/i);
   assert.doesNotMatch(packageText, /"(?:react|vue|svelte|lucide|iconify|font-awesome|morphicons)"\s*:/i);
 
   for (const source of [dom, spring, normalize]) {
@@ -932,7 +934,7 @@ test('Maybank 手机 Dialog 不把 Safari 26 底栏染黄，账户分组没有�
   assert.doesNotMatch(styles, /\.sheet-actions\s*\{[^}]*background:\s*linear-gradient/s);
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 30 候选和受支持 runtime', async () => {
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 31 Lucide 试验候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -941,7 +943,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 30 候选和�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-30/);
+  assert.match(worker, /family-wallet-v2-cloud-31-lucide-trial/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'

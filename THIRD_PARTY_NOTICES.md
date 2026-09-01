@@ -29,3 +29,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Lucide Static 1.38.0
+
+Family Wallet includes a curated set of SVG endpoints generated from [Lucide](https://github.com/lucide-icons/lucide), version 1.38.0. The exact package version and integrity are pinned; selected endpoints are generated at development time and self-hosted with no browser CDN request. The official license and package provenance are stored under `app/vendor/lucide/1.38.0/`.
+
+Lucide is licensed under the ISC License. Some selected Lucide icons are derived from Feather and remain covered by the MIT notice included in the official Lucide `LICENSE` file shipped with this application.

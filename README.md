@@ -114,7 +114,7 @@ Use `?local=1` for the device-only demonstration mode. It does not connect to Fi
 
 ### Browser runtime dependencies
 
-The state-icon subsystem is self-hosted: Morphicons 1.7.1 is pinned under `app/vendor/morphicons/1.7.1/`, included in the offline shell and documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). It does not load an icon CDN, icon font, UI framework or second icon family. The existing Firebase integration remains separate and continues to import the official Firebase browser SDK modules from `www.gstatic.com` in `app/firebase-client.js`.
+The state-icon subsystem is self-hosted: Morphicons 1.7.1 and a curated Lucide Static 1.38.0 endpoint set are pinned, included in the offline shell and documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Lucide endpoint file is generated deterministically from the exact development dependency; the browser does not load an icon CDN, icon font or UI framework. The existing Firebase integration remains separate and continues to import the official Firebase browser SDK modules from `www.gstatic.com` in `app/firebase-client.js`.
 
 ## Item payment and export boundaries
 
