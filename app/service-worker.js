@@ -1,4 +1,4 @@
-const CACHE = 'family-wallet-v2-cloud-32-family-logo';
+const CACHE = 'family-wallet-v2-cloud-33-logo-edgefix';
 const ASSETS = [
   './', './index.html', './styles.css', './main.js', './ledger.js', './items.js', './item-media.js', './items-view.js', './cloud-sync.js',
   './backup-restore.js', './wallet-features.js', './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
@@ -7,7 +7,7 @@ const ASSETS = [
   './vendor/morphicons/1.7.1/normalize-CYnN3Npw.js', './vendor/morphicons/1.7.1/LICENSE',
   './vendor/morphicons/1.7.1/provenance.json',
   './vendor/lucide/1.38.0/LICENSE', './vendor/lucide/1.38.0/provenance.json',
-  './icons/favicon-32.png', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'
+  './icons/favicon-32.png?v=33', './icons/apple-touch-icon.png?v=33', './icons/favicon-32.png', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'
 ];
 
 self.addEventListener('install', event => event.waitUntil(
