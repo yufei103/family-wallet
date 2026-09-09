@@ -3,20 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f3f7f6">
+  <meta name="theme-color" content="#f8f4ed">
   <meta name="description" content="可由家人共同使用的私人家庭账本">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Family Wallet">
-  <script>try{document.documentElement.dataset.theme=localStorage.getItem('family-wallet-v2-theme')||'teal'}catch{document.documentElement.dataset.theme='teal'}</script>
+  <script>try{const t=localStorage.getItem('family-wallet-v2-theme');document.documentElement.dataset.theme=['warm','teal','maybank','cimb','ocean'].includes(t)?t:'warm'}catch{document.documentElement.dataset.theme='warm'}</script>
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="stylesheet" href="./styles.css">
-  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png?v=33">
+  <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png?v=33">
   <title>Family Wallet V2</title>
 </head>
 <body>
   <section class="auth-gate" id="authGate" aria-live="polite">
+    <div class="login-matrix" aria-hidden="true"><canvas id="loginDotMatrix" aria-hidden="true"></canvas></div>
     <div class="auth-card">
       <p class="app-name"><img class="brand-logo" src="./icons/icon-192.png" width="24" height="24" alt="">Family Wallet</p>
       <h1>你的家庭账本</h1>
@@ -489,11 +490,14 @@
       </div>
       <fieldset class="theme-picker">
         <legend>应用配色</legend>
+        <label><input type="radio" name="appTheme" value="warm"><span><i class="theme-swatch warm" aria-hidden="true"></i><b>暖米色</b><small>默认配色</small><i class="theme-choice-icon"><svg class="app-icon" data-state-icon="theme" data-icon-state="idle" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path data-state-icon-path d="M4 4h16v16H4V4zM4 12h16M12 4v16"/></svg></i></span></label>
         <label><input type="radio" name="appTheme" value="teal"><span><i class="theme-swatch teal" aria-hidden="true"></i><b>清透青</b><small>目前配色</small><i class="theme-choice-icon"><svg class="app-icon" data-state-icon="theme" data-icon-state="idle" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path data-state-icon-path d="M4 4h16v16H4V4zM4 12h16M12 4v16"/></svg></i></span></label>
         <label><input type="radio" name="appTheme" value="maybank"><span><i class="theme-swatch maybank" aria-hidden="true"></i><b>Maybank 黄</b><small>明亮高对比</small><i class="theme-choice-icon"><svg class="app-icon" data-state-icon="theme" data-icon-state="idle" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path data-state-icon-path d="M4 4h16v16H4V4zM4 12h16M12 4v16"/></svg></i></span></label>
         <label><input type="radio" name="appTheme" value="cimb"><span><i class="theme-swatch cimb" aria-hidden="true"></i><b>CIMB 红</b><small>稳重醒目</small><i class="theme-choice-icon"><svg class="app-icon" data-state-icon="theme" data-icon-state="idle" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path data-state-icon-path d="M4 4h16v16H4V4zM4 12h16M12 4v16"/></svg></i></span></label>
         <label><input type="radio" name="appTheme" value="ocean"><span><i class="theme-swatch ocean" aria-hidden="true"></i><b>深海蓝</b><small>经典金融</small><i class="theme-choice-icon"><svg class="app-icon" data-state-icon="theme" data-icon-state="idle" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path data-state-icon-path d="M4 4h16v16H4V4zM4 12h16M12 4v16"/></svg></i></span></label>
       </fieldset>
+      <p class="sheet-description" id="themeSyncStatus" role="status"></p>
+      <button class="text-button" id="retryThemeSync" type="button" hidden>重试配色同步</button>
       <section class="settings-section" id="householdMembersSection">
         <div class="settings-section-head"><div><h3>家庭成员</h3><p>成员状态与待处理邀请</p></div><button class="text-button" id="refreshMembersButton" type="button">重新载入</button></div>
         <div class="member-list surface-list" id="memberList"><p class="settings-placeholder">载入成员中…</p></div>

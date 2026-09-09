@@ -48,6 +48,20 @@
   font-synthesis: none;
 }
 
+:root[data-theme="warm"] {
+  --bg: #f8f4ed;
+  --surface: #fffdf9;
+  --surface-soft: #f0e8dc;
+  --surface-muted: #fbf8f2;
+  --ink: #302a24;
+  --muted: #736657;
+  --line: rgba(60, 46, 32, 0.12);
+  --accent: #876548;
+  --accent-strong: #65482f;
+  --accent-soft: #eee0cb;
+  --accent-shadow: rgba(99, 70, 43, 0.18);
+}
+
 :root[data-theme="maybank"] {
   --bg: #f8f6ef;
   --surface-soft: #f4eed6;
@@ -117,8 +131,12 @@ svg { width: 1.35rem; height: 1.35rem; fill: none; stroke: currentColor; stroke-
   padding: calc(20px + env(safe-area-inset-top)) 20px calc(118px + env(safe-area-inset-bottom));
 }
 
-.auth-gate { display: grid; place-items: center; min-height: 100dvh; padding: calc(24px + env(safe-area-inset-top)) 20px calc(24px + env(safe-area-inset-bottom)); }
-.auth-card { width: min(100%, 430px); padding: 28px; border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-elevated); }
+.auth-gate { position: relative; isolation: isolate; display: grid; place-items: center; min-height: 100dvh; padding: calc(24px + env(safe-area-inset-top)) 20px calc(24px + env(safe-area-inset-bottom)); }
+.login-matrix { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: -1; background-color: var(--bg); background-image: radial-gradient(circle, color-mix(in srgb, var(--accent-strong) 14%, transparent) 1px, transparent 1.2px); background-size: 24px 24px; }
+.login-matrix canvas { display: block; width: 100%; height: 100%; color: var(--accent-strong); pointer-events: none; }
+.login-matrix canvas[data-rendered="true"] { background: var(--bg); }
+.theme-swatch.warm { background: #876548; }
+.auth-card { width: min(100%, 430px); padding: 28px; border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-elevated); }
 .auth-card h1 { margin-bottom: 12px; }
 .auth-card > p:not(.app-name), .pending-invite p { color: var(--muted); font-size: 13px; line-height: 1.55; }
 .google-button { width: 100%; min-height: 52px; margin-top: 22px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--ink); font-weight: 800; }

@@ -2,7 +2,7 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { initializeTestEnvironment, assertSucceeds, assertFails } from '@firebase/rules-unit-testing';
-import { arrayUnion, deleteDoc, doc, getDoc, runTransaction, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
+import { arrayUnion, deleteDoc, doc, getDoc, onSnapshot, runTransaction, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 
 const projectId = 'family-wallet-v2-emulator';
 const householdId = 'home-kris';
@@ -171,6 +171,34 @@ beforeEach(async () => {
   batch.set(doc(member, 'households', householdId, 'members', 'member-b'), memberRecord('member-b', memberEmail, 'member'));
   batch.update(doc(member, 'invites', memberEmail), { status: 'accepted', acceptedBy: 'member-b', acceptedAt: T1 });
   await assertSucceeds(batch.commit());
+});
+
+test('个人主题在现有 users 规则下允许本人修改与双设备同步，禁止家人/陌生人/未登录读取或改写', async () => {
+  const owner = authDb('owner-a', ownerEmail), second = authDb('owner-a', ownerEmail);
+  const member = authDb('member-b', memberEmail), stranger = authDb('stranger', 'stranger@example.com');
+  const own = doc(owner, 'users', 'owner-a');
+  const before = (await getDoc(own)).data();
+  await assertSucceeds(updateDoc(doc(member, 'users', 'member-b'), { theme: 'cimb' }));
+  let stop;
+  const received = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { stop?.(); reject(Error('theme snapshot timeout')); }, 5000);
+    stop = onSnapshot(doc(second, 'users', 'owner-a'), snapshot => {
+      if (snapshot.data()?.theme === 'ocean') { clearTimeout(timer); stop(); resolve(snapshot.data()); }
+    }, error => { clearTimeout(timer); reject(error); });
+  });
+  try {
+    await assertSucceeds(updateDoc(own, { theme: 'ocean' }));
+    assert.equal((await received).theme, 'ocean');
+  } finally { stop?.(); }
+  assert.deepEqual((await getDoc(own)).data(), { ...before, theme: 'ocean' });
+  assert.equal((await getDoc(doc(member, 'users', 'member-b'))).data().theme, 'cimb');
+  for (const db of [member, stranger, env.unauthenticatedContext().firestore()]) {
+    await assertFails(getDoc(doc(db, 'users', 'owner-a')));
+    await assertFails(updateDoc(doc(db, 'users', 'owner-a'), { theme: 'warm' }));
+  }
+  await assertFails(setDoc(doc(stranger, 'users', 'stranger'), { uid: 'stranger', email: 'stranger@example.com', theme: 'warm' }));
+  await assertFails(updateDoc(own, { theme: 'warm', uid: 'member-b' }));
+  await assertFails(updateDoc(own, { theme: 'warm', email: memberEmail }));
 });
 
 test('现有 owner/member/invite/access 行为保持可用', async () => {

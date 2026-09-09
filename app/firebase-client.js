@@ -10,6 +10,8 @@ import {
   updateDoc, where, writeBatch
 } from 'https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js';
 
+import { THEMES } from './theme-preferences.js';
+
 const now = () => new Date().toISOString();
 const cleanEmail = email => String(email ?? '').trim().toLowerCase();
 const cleanRecord = value => JSON.parse(JSON.stringify(value));
@@ -851,6 +853,12 @@ export async function createFirebaseWallet({ config, useEmulators = false }) {
     signInTestUser: (email, password) => signInWithEmailAndPassword(auth, cleanEmail(email), password),
     logout: () => signOut(auth),
     ensureWorkspace,
+    saveTheme: (uid, theme) => {
+      if (!uid || auth.currentUser?.uid !== uid || !THEMES.has(theme)) {
+        return Promise.reject(new Error('无法保存当前帐号的配色'));
+      }
+      return updateDoc(doc(db, 'users', uid), { theme });
+    },
     watchUser: (uid, onData, onError) => onSnapshot(
       doc(db, 'users', uid),
       { includeMetadataChanges: true },

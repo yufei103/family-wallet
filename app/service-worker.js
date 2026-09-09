@@ -1,13 +1,13 @@
-const CACHE = 'family-wallet-v2-cloud-32-family-logo';
+const CACHE = 'family-wallet-v2-cloud-34-personal-theme';
 const ASSETS = [
   './', './index.html', './styles.css', './main.js', './ledger.js', './items.js', './item-media.js', './items-view.js', './cloud-sync.js',
   './backup-restore.js', './wallet-features.js', './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
-  './state-icon-data.js', './lucide-icon-data.js', './state-icon-motion.js',
+  './state-icon-data.js', './lucide-icon-data.js', './state-icon-motion.js', './theme-preferences.js', './login-dot-matrix.js',
   './vendor/morphicons/1.7.1/dom.js', './vendor/morphicons/1.7.1/spring-CFHloqPP.js',
   './vendor/morphicons/1.7.1/normalize-CYnN3Npw.js', './vendor/morphicons/1.7.1/LICENSE',
   './vendor/morphicons/1.7.1/provenance.json',
   './vendor/lucide/1.38.0/LICENSE', './vendor/lucide/1.38.0/provenance.json',
-  './icons/favicon-32.png', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'
+  './icons/favicon-32.png?v=33', './icons/apple-touch-icon.png?v=33', './icons/favicon-32.png', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'
 ];
 
 self.addEventListener('install', event => event.waitUntil(
