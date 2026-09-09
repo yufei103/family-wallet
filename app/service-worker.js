@@ -1,8 +1,8 @@
-const CACHE = 'family-wallet-v2-cloud-33-logo-edgefix';
+const CACHE = 'family-wallet-v2-cloud-34-personal-theme';
 const ASSETS = [
   './', './index.html', './styles.css', './main.js', './ledger.js', './items.js', './item-media.js', './items-view.js', './cloud-sync.js',
   './backup-restore.js', './wallet-features.js', './firebase-config.js', './firebase-client.js', './manifest.webmanifest',
-  './state-icon-data.js', './lucide-icon-data.js', './state-icon-motion.js',
+  './state-icon-data.js', './lucide-icon-data.js', './state-icon-motion.js', './theme-preferences.js', './login-dot-matrix.js',
   './vendor/morphicons/1.7.1/dom.js', './vendor/morphicons/1.7.1/spring-CFHloqPP.js',
   './vendor/morphicons/1.7.1/normalize-CYnN3Npw.js', './vendor/morphicons/1.7.1/LICENSE',
   './vendor/morphicons/1.7.1/provenance.json',

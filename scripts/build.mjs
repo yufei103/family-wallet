@@ -10,7 +10,7 @@ const required = [
   'index.html', 'styles.css', 'main.js', 'ledger.js', 'items.js', 'item-media.js',
   'items-view.js', 'cloud-sync.js', 'backup-restore.js', 'wallet-features.js',
   'firebase-client.js', 'service-worker.js', 'manifest.webmanifest',
-  'state-icon-data.js', 'lucide-icon-data.js', 'state-icon-motion.js'
+  'state-icon-data.js', 'lucide-icon-data.js', 'state-icon-motion.js', 'theme-preferences.js', 'login-dot-matrix.js'
 ];
 const iconFiles = ['favicon-32.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 const vendorRelative = 'vendor/morphicons/1.7.1';

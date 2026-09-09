@@ -50,7 +50,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-33-logo-edgefix/);
+  assert.match(worker, /family-wallet-v2-cloud-34-personal-theme/);
 });
 
 test('Morphicons PWA foundation is pinned, self-hosted, progressive and framework-free', async () => {
@@ -793,8 +793,10 @@ test('用户反馈界面：账户可辨识、排除总额不冻结、贷款留�
   for (const theme of ['teal', 'maybank', 'cimb', 'ocean']) {
     assert.match(html, new RegExp(`name="appTheme" value="${theme}"`));
   }
-  assert.match(main, /const THEME_STORE = 'family-wallet-v2-theme'/);
-  assert.match(main, /localStorage\.setItem\(THEME_STORE, selected\)/);
+  const themes = await readFile(new URL('./theme-preferences.js', import.meta.url), 'utf8');
+  assert.match(themes, /const THEME_STORE = 'family-wallet-v2-theme'/);
+  assert.match(themes, /storage\.setItem\(THEME_STORE, theme\)/);
+  assert.match(main, /themePreferences\.choose\(input.value\)/);
   assert.match(styles, /:root\[data-theme="maybank"\]/);
   assert.match(styles, /:root\[data-theme="cimb"\]/);
   assert.match(styles, /:root\[data-theme="ocean"\]/);
@@ -958,7 +960,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 32 家庭图�
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-33-logo-edgefix/);
+  assert.match(worker, /family-wallet-v2-cloud-34-personal-theme/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'

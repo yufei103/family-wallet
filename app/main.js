@@ -23,11 +23,12 @@ import {
   isOnboardingDismissed, loadEntryTemplates, onboardingState, saveEntryTemplate
 } from './wallet-features.js';
 import { resolveStateIcon, stateIconMarkup, staticIconMarkup } from './state-icon-data.js';
+import { createThemePreferences, normaliseTheme, readCachedTheme } from './theme-preferences.js';
+import { mountLoginDotMatrix } from './login-dot-matrix.js';
 
 const STORE = 'family-wallet-v2-local-demo';
 const ENTRY_PREFS_STORE = 'family-wallet-v2-entry-preferences';
-const THEME_STORE = 'family-wallet-v2-theme';
-const THEMES = new Set(['teal', 'maybank', 'cimb', 'ocean']);
+
 const ENTRY_CATEGORIES = ['薪水', '购物', '医疗', '房贷', '电费', '税费', '打油', '汽车'];
 const accountDetailPageSize = () => innerWidth < 600 ? 6 : 10;
 const $ = selector => document.querySelector(selector);
@@ -343,17 +344,36 @@ function hydrateEntryPreferences() {
   }
 }
 
-function applyTheme(theme, { persist = true } = {}) {
-  const selected = THEMES.has(theme) ? theme : 'teal';
+function applyTheme(theme) {
+  const selected = normaliseTheme(theme);
   document.documentElement.dataset.theme = selected;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#f3f7f6');
   document.querySelectorAll('input[name="appTheme"]').forEach(input => {
     input.checked = input.value === selected;
     setStateIcon(input.closest('label'), input.checked ? 'selected' : 'idle');
   });
-  if (persist) localStorage.setItem(THEME_STORE, selected);
   return selected;
 }
+
+const themePreferences = createThemePreferences({
+  storage: localStorage,
+  apply: applyTheme,
+  save: (userId, theme) => cloud.saveTheme(userId, theme),
+  onStatus: state => {
+    const messages = {
+      local: '配色保存在这台设备；登录后使用你自己的帐号配色。',
+      loading: '正在读取你的个人配色…',
+      pending: '配色已在本机应用，等待同步到你的帐号…',
+      synced: '配色已同步到你的帐号，不影响其他家庭成员。',
+      cached: '正在使用你的缓存配色，等待云端确认。',
+      error: '配色暂未同步；可重新选择重试，不影响记账。'
+    };
+    $('#themeSyncStatus').textContent = messages[state];
+    $('#themeSyncStatus').dataset.state = state;
+    $('#retryThemeSync').hidden = state !== 'error';
+  }
+});
+let themeSession = null;
 
 function persist() {
   if (runtimeMode === 'local') {
@@ -3371,7 +3391,8 @@ document.querySelectorAll('input[name="accountSubtype"]').forEach(input => input
 $('#loanType').addEventListener('change', () => { updateLoanFields({ resetMode:true }); updateAccountSubtypeFields(); });
 $('#loanCalculationMode').addEventListener('change', updateAccountSubtypeFields);
 document.querySelectorAll('input[name="repaymentFunding"]').forEach(input => input.addEventListener('change', updateRepaymentFunding));
-document.querySelectorAll('input[name="appTheme"]').forEach(input => input.addEventListener('change', () => applyTheme(input.value)));
+document.querySelectorAll('input[name="appTheme"]').forEach(input => input.addEventListener('change', () => themePreferences.choose(input.value)));
+$('#retryThemeSync').addEventListener('click', () => themePreferences.choose(document.documentElement.dataset.theme));
 $('#openRepaymentButton').addEventListener('click', () => openRepaymentFromDetail(selectedAccountDetailId));
 $('#repaymentAmount').addEventListener('input', renderRepaymentBreakdown);
 $('#repaymentInterest').addEventListener('input', renderRepaymentBreakdown);
@@ -3792,9 +3813,14 @@ function switchCloudHousehold(householdId, { persistSelection = false } = {}) {
   }
 }
 
-async function applyCloudProfile(profile, sessionToken = cloudSessionToken) {
+async function applyCloudProfile(profile, sessionToken = cloudSessionToken, metadata) {
   if (!profile || sessionToken !== cloudSessionToken || sessionToken?.sessionGeneration !== syncCoordinator.getState().sessionGeneration) return;
+  themePreferences.receive(profile, themeSession, metadata);
+  const previousProfile = cloudProfile;
   cloudProfile = profile;
+  // Theme/metadata-only updates reuse the user listener without re-reading financial paths.
+  if (previousProfile && JSON.stringify(previousProfile.householdIds) === JSON.stringify(profile.householdIds)
+    && previousProfile.selectedHouseholdId === profile.selectedHouseholdId) return;
   const options = await cloud.householdOptions(profile.householdIds || []);
   if (sessionToken !== cloudSessionToken) return;
   const selected = options.some(option => option.id === profile.selectedHouseholdId) ? profile.selectedHouseholdId : options[0]?.id;
@@ -3805,6 +3831,8 @@ async function applyCloudProfile(profile, sessionToken = cloudSessionToken) {
 }
 
 async function handleCloudUser(user) {
+  themeSession = themePreferences.beginUser(user?.uid);
+  cloudProfile = null;
   stopUserWatch?.();
   stopInviteWatch?.();
   stopHouseholdWatch?.();
@@ -3836,12 +3864,18 @@ async function handleCloudUser(user) {
   cloudSessionToken = syncCoordinator.beginSession();
   syncCoordinator.setOnline(navigator.onLine);
   showAuth('正在打开你的账本…');
-  const profile = await cloud.ensureWorkspace(user);
   const sessionToken = cloudSessionToken;
-  stopUserWatch = cloud.watchUser(user.uid, value => applyCloudProfile(value, sessionToken).catch(error => {
+  const profile = await cloud.ensureWorkspace(user);
+  if (sessionToken !== cloudSessionToken || cloudUser?.uid !== user.uid) return;
+  await applyCloudProfile(profile, sessionToken);
+  if (sessionToken !== cloudSessionToken) return;
+  stopUserWatch = cloud.watchUser(user.uid, (value, metadata) => applyCloudProfile(value, sessionToken, metadata).catch(error => {
+    if (sessionToken !== cloudSessionToken) return;
     if (!currentHousehold && sessionToken === cloudSessionToken) showAuth(error.message);
     else showToast(error.message, 'error');
   }), error => {
+    if (sessionToken !== cloudSessionToken) return;
+    themePreferences.error(themeSession);
     if (!currentHousehold && sessionToken === cloudSessionToken) showAuth(error.message);
     else showToast(`个人资料监听中断：${error.message}`, 'error');
   });
@@ -3855,7 +3889,6 @@ async function handleCloudUser(user) {
       showAuth(`你已使用 ${user.email} 登录。`);
     }
   }, error => currentHousehold ? showToast(error.message, 'error') : showAuth(error.message, 'error'));
-  await applyCloudProfile(profile, sessionToken);
 }
 
 let googleSignInPending = false;
@@ -3990,10 +4023,13 @@ async function startRuntime() {
   runtimeMode = useEmulators ? 'emulator' : 'cloud';
   showAuth(useEmulators ? '正在初始化本机 Firebase Emulator…' : '正在检查 Google 登录状态…');
   cloud = await createFirebaseWallet({ config: firebaseConfig, useEmulators });
+  let authChangeGeneration = 0;
   cloud.onAuthChanged(user => {
+    const generation = ++authChangeGeneration;
     if (useEmulators) $('#testAuthControls').hidden = false;
     else $('#googleSignInButton').hidden = Boolean(user);
     handleCloudUser(user).catch(error => {
+      if (generation !== authChangeGeneration) return;
       if (!useEmulators) $('#googleSignInButton').hidden = Boolean(user);
       showAuth(user
         ? `Google 登录仍然有效，但账本暂时无法打开：${error.message}。请刷新后重试。`
@@ -4022,7 +4058,9 @@ document.addEventListener('visibilitychange', () => {
 
 initializeFeedbackRows();
 initializeActionButtons();
-applyTheme(localStorage.getItem(THEME_STORE) || document.documentElement.dataset.theme || 'teal', { persist:false });
+applyTheme(readCachedTheme(localStorage));
+themePreferences.beginUser(null);
+mountLoginDotMatrix($('#loginDotMatrix'), $('#authGate'));
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', handleWalletUpdateMessage);
   navigator.serviceWorker.register('./service-worker.js', { updateViaCache:'none' })
