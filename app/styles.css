@@ -133,7 +133,9 @@ svg { width: 1.35rem; height: 1.35rem; fill: none; stroke: currentColor; stroke-
 .topbar-actions { display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: flex-start; justify-content: flex-end; gap: 6px; }
 .workspace-select { width: clamp(108px, 31vw, 180px); min-height: 44px; max-width: 180px; padding: 0 32px 0 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: var(--text-caption); font-weight: 700; }
 .topbar-actions .icon-button { width: 44px; min-height: 44px; }
-.app-name { margin-bottom: 2px; color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: 0.02em; }
+.app-name { display: flex; align-items: center; gap: 7px; margin-bottom: 2px; color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: 0.02em; }
+.brand-logo { display: block; flex: 0 0 auto; width: 24px; height: 24px; object-fit: contain; border-radius: 6px; }
+.auth-card .brand-logo { width: 48px; height: 48px; border-radius: 12px; }
 h1 { font-size: clamp(27px, 7vw, 34px); line-height: 1.05; letter-spacing: -0.035em; }
 h2 { font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; }
 .local-badge { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; width: max-content; min-height: 44px; margin: 0; padding: 0 6px 0 8px; border: 0; border-radius: 999px; background: transparent; color: var(--accent-strong); font-size: var(--text-caption); font-weight: 700; text-align: center; white-space: nowrap; }
@@ -1061,7 +1063,7 @@ body.is-switching [data-mutation] { pointer-events: none; opacity: .45; }
     background: color-mix(in srgb, var(--surface) 88%, var(--bg));
   }
   .desktop-brand { display: flex; align-items: center; gap: 11px; min-height: 48px; padding: 0 10px; }
-  .desktop-brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 850; letter-spacing: -.02em; }
+  .desktop-brand-mark { display: block; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 8px; object-fit: contain; }
   .desktop-brand div { min-width: 0; }
   .desktop-brand b, .desktop-brand small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .desktop-brand b { font-size: 14px; letter-spacing: -.01em; }

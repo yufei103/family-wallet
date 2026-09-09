@@ -50,7 +50,7 @@ test('Premium Mobile UI 保留主要视图、洞察层级与移动材质', async
   assert.match(styles, /\.bottom-nav\s*\{[^}]*backdrop-filter:/s);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /env\(safe-area-inset-bottom\)/);
-  assert.match(worker, /family-wallet-v2-cloud-31-lucide-trial/);
+  assert.match(worker, /family-wallet-v2-cloud-32-family-logo/);
 });
 
 test('Morphicons PWA foundation is pinned, self-hosted, progressive and framework-free', async () => {
@@ -934,7 +934,20 @@ test('Maybank 手机 Dialog 不把 Safari 26 底栏染黄，账户分组没有�
   assert.doesNotMatch(styles, /\.sheet-actions\s*\{[^}]*background:\s*linear-gradient/s);
 });
 
-test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 31 Lucide 试验候选和受支持 runtime', async () => {
+test('品牌图标在登录、顶部和桌面使用同一图片，安装图标尺寸正确', async () => {
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  assert.equal((html.match(/class="brand-logo"/g) || []).length, 2);
+  assert.match(html, /<img class="desktop-brand-mark"[^>]+src="\.\/icons\/icon-192\.png"/);
+  assert.doesNotMatch(html, />FW<\/span>/);
+  for (const [file, size] of [['favicon-32.png',32], ['apple-touch-icon.png',180], ['icon-192.png',192], ['icon-512.png',512], ['icon-maskable-512.png',512]]) {
+    const bytes = await readFile(new URL(`./icons/${file}`, import.meta.url));
+    assert.equal(bytes.subarray(1,4).toString(), 'PNG');
+    assert.equal(bytes.readUInt32BE(16), size);
+    assert.equal(bytes.readUInt32BE(20), size);
+  }
+});
+
+test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 32 家庭图标候选和受支持 runtime', async () => {
   const [build, worker, workflow] = await Promise.all([
     readFile(app('../scripts/build.mjs'), 'utf8'), readFile(app('./service-worker.js'), 'utf8'),
     readFile(app('../.github/workflows/pages.yml'), 'utf8')
@@ -943,7 +956,7 @@ test('Build、Service Worker 与 GitHub Actions 使用同一 Cloud 31 Lucide 试
     assert.match(build, new RegExp(module.replace('.', '\\.')));
     assert.match(worker, new RegExp(module.replace('.', '\\.')));
   }
-  assert.match(worker, /family-wallet-v2-cloud-31-lucide-trial/);
+  assert.match(worker, /family-wallet-v2-cloud-32-family-logo/);
   for (const action of [
     'actions/checkout@v7', 'actions/setup-node@v7', 'actions/setup-java@v6',
     'actions/configure-pages@v6', 'actions/upload-pages-artifact@v5', 'actions/deploy-pages@v5'
